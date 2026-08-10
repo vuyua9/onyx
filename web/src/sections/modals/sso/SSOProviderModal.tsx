@@ -16,6 +16,7 @@ import type {
 import { useSupportedSSOProviderTypes } from "@/lib/sso/hooks";
 import { NEXT_PUBLIC_CLOUD_ENABLED } from "@/lib/constants";
 import { createSSOProvider, updateSSOProvider } from "@/lib/sso/svc";
+import SSODomainVerification from "@/sections/modals/sso/SSODomainVerification";
 import {
   CONFIG_FIELDS_BY_TYPE,
   copyRedirectUri,
@@ -419,6 +420,10 @@ export function SSOProviderModal({ provider, onSaved }: SSOProviderModalProps) {
                       transform={(value) => value.toLowerCase()}
                     />
                   </InputVertical>
+
+                  <SSODomainVerification
+                    domains={values.allowed_email_domains}
+                  />
 
                   {provider?.redirect_uri && (
                     <InputVertical

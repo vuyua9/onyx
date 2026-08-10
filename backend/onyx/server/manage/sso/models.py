@@ -27,6 +27,31 @@ class SSOProviderEnabledRequest(BaseModel):
     enabled: bool
 
 
+class SSOLoginDomainStatus(BaseModel):
+    domain: str
+    verified: bool
+
+
+class SSOLoginDomainsResponse(BaseModel):
+    domains: list[SSOLoginDomainStatus]
+    # Role-mailbox local parts a verification code may be sent to.
+    mailbox_prefixes: list[str]
+
+
+class SSODomainSendCodeRequest(BaseModel):
+    domain: str
+    mailbox_prefix: str
+
+
+class SSODomainSendCodeResponse(BaseModel):
+    recipient: str
+
+
+class SSODomainVerifyEmailRequest(BaseModel):
+    domain: str
+    code: str
+
+
 class SSOProviderResponse(BaseModel):
     id: int
     name: str

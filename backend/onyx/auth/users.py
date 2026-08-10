@@ -1102,6 +1102,13 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
 
             assert user is not None
 
+            if override is not None:
+                # A pinned login skipped the provisioning that records
+                # membership. Record it here, before the link below needs the row.
+                fetch_ee_implementation_or_noop(
+                    "onyx.db.user_tenant_mapping", "ensure_tenant_membership", None
+                )(user.email, tenant_id, oauth_name, account_id)
+
             # Keyed on the stored email rather than the one the IdP just sent.
             # The membership row moves onto the new address at the rekey below.
             fetch_ee_implementation_or_noop(

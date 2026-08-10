@@ -1,0 +1,229 @@
+"""Email-domain routing for the cloud login page.
+
+Someone signing in for the first time has no account and no membership row, so
+nothing about them names a workspace. Their address domain does, once an admin
+has declared it on a provider and proven the workspace controls it. Those
+declarations live in per-tenant tables that cannot be read before a workspace is
+known, so they are projected here, into the one catalog every login request can
+reach.
+
+A domain only routes once it is verified. Declaring a domain records a pending
+claim; the workspace proves control by receiving a code at a role mailbox on the
+domain. Until then the domain routes nowhere, so a workspace cannot pull
+addresses on a domain it has not shown it owns. Several workspaces may hold the
+same domain pending, but only one can verify it.
+"""
+
+import datetime
+from typing import NamedTuple
+
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
+
+from onyx.db.engine.sql_engine import get_catalog_session, get_session_with_tenant
+from onyx.db.engine.tenant_utils import get_all_tenant_ids
+from onyx.db.models import TenantSSODomain
+from onyx.db.sso_provider import fetch_sso_providers
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
+from onyx.utils.logger import setup_logger
+from shared_configs.configs import MULTI_TENANT, POSTGRES_DEFAULT_SCHEMA
+
+logger = setup_logger()
+
+# Shared consumer domains never route: a member on one would otherwise send
+# every address on it to one workspace. Matched exactly, so a corporate domain
+# that merely contains a consumer word (livenation.com) still routes.
+PUBLIC_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "outlook.fr",
+        "hotmail.com",
+        "hotmail.co.uk",
+        "hotmail.fr",
+        "live.com",
+        "live.co.uk",
+        "msn.com",
+        "yahoo.com",
+        "yahoo.co.uk",
+        "yahoo.co.in",
+        "ymail.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "pm.me",
+        "zoho.com",
+        "gmx.com",
+        "gmx.net",
+        "yandex.com",
+        "yandex.ru",
+        "mail.ru",
+        "qq.com",
+        "163.com",
+        "126.com",
+        "sina.com",
+        "foxmail.com",
+        "comcast.net",
+        "verizon.net",
+        "att.net",
+        "sbcglobal.net",
+        "cox.net",
+        "fastmail.com",
+        "hey.com",
+    }
+)
+
+
+def is_routable_email_domain(domain: str) -> bool:
+    return domain.strip().lower() not in PUBLIC_EMAIL_DOMAINS
+
+
+def lookup_tenant_id_for_email_domain(email: str) -> str | None:
+    """Workspace an address routes to on its domain alone, for someone who has
+    no account yet. Only verified domains route."""
+    if not MULTI_TENANT:
+        return None
+
+    _, _, domain = email.rpartition("@")
+    domain = domain.strip().lower()
+    if not domain or not is_routable_email_domain(domain):
+        return None
+
+    with get_catalog_session() as db_session:
+        return db_session.scalar(
+            select(TenantSSODomain.tenant_id).where(
+                TenantSSODomain.domain == domain,
+                TenantSSODomain.verified_at.isnot(None),
+            )
+        )
+
+
+def claim_email_domains(tenant_id: str, domains: list[str]) -> None:
+    """Record this workspace's pending claim on the domains it declares, and drop
+    any it no longer claims.
+
+    A claim does not route until verified. A domain that stays claimed keeps its
+    verification, so re-saving a provider never un-verifies a domain.
+    """
+    if not MULTI_TENANT:
+        return
+
+    wanted = {
+        domain.strip().lower()
+        for domain in domains
+        if domain.strip() and is_routable_email_domain(domain)
+    }
+
+    with get_catalog_session() as db_session:
+        held = set(
+            db_session.scalars(
+                select(TenantSSODomain.domain).where(
+                    TenantSSODomain.tenant_id == tenant_id
+                )
+            ).all()
+        )
+
+        released = held - wanted
+        if released:
+            db_session.execute(
+                delete(TenantSSODomain).where(
+                    TenantSSODomain.tenant_id == tenant_id,
+                    TenantSSODomain.domain.in_(released),
+                )
+            )
+
+        for domain in wanted - held:
+            db_session.add(TenantSSODomain(tenant_id=tenant_id, domain=domain))
+
+        db_session.commit()
+
+
+class LoginDomainRecord(NamedTuple):
+    domain: str
+    verified: bool
+
+
+def list_login_domains(tenant_id: str) -> list[LoginDomainRecord]:
+    """The workspace's claimed domains and whether each is verified."""
+    if not MULTI_TENANT:
+        return []
+
+    with get_catalog_session() as db_session:
+        rows = db_session.execute(
+            select(TenantSSODomain.domain, TenantSSODomain.verified_at).where(
+                TenantSSODomain.tenant_id == tenant_id
+            )
+        ).all()
+
+    return [
+        LoginDomainRecord(domain=domain, verified=verified_at is not None)
+        for domain, verified_at in rows
+    ]
+
+
+def is_claimed_domain(tenant_id: str, domain: str) -> bool:
+    if not MULTI_TENANT:
+        return False
+    with get_catalog_session() as db_session:
+        return db_session.get(TenantSSODomain, (tenant_id, domain)) is not None
+
+
+def mark_domain_verified(tenant_id: str, domain: str) -> None:
+    """Flag a claimed domain verified so it starts routing. Raises if another
+    workspace already verified it, which the partial-unique index enforces."""
+    if not MULTI_TENANT:
+        return
+
+    with get_catalog_session() as db_session:
+        row = db_session.get(TenantSSODomain, (tenant_id, domain))
+        if row is None:
+            raise OnyxError(
+                OnyxErrorCode.NOT_FOUND, "This workspace has not claimed that domain."
+            )
+        if row.verified_at is not None:
+            return
+        row.verified_at = datetime.datetime.now(datetime.timezone.utc)
+        try:
+            db_session.commit()
+        except IntegrityError as e:
+            db_session.rollback()
+            raise OnyxError(
+                OnyxErrorCode.DUPLICATE_RESOURCE,
+                "Another workspace has already verified this domain.",
+            ) from e
+
+
+def reconcile_login_domain_routing() -> None:
+    """Re-project every workspace's enabled-provider domains into the catalog.
+
+    The projection is written on provider save, so this backfills workspaces
+    whose providers predate routing and have not been re-saved since. Existing
+    claims keep their verification.
+    """
+    if not MULTI_TENANT:
+        return
+
+    for tenant_id in get_all_tenant_ids():
+        if tenant_id == POSTGRES_DEFAULT_SCHEMA:
+            continue
+        try:
+            with get_session_with_tenant(tenant_id=tenant_id) as db_session:
+                domains = sorted(
+                    {
+                        domain
+                        for provider in fetch_sso_providers(
+                            db_session, enabled_only=True
+                        )
+                        for domain in provider.allowed_email_domains
+                    }
+                )
+            claim_email_domains(tenant_id, domains)
+        except Exception:
+            logger.exception(
+                "Failed to reconcile login domain routing for workspace %s", tenant_id
+            )

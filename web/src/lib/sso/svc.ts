@@ -86,3 +86,54 @@ export function setSSOProviderEnabled(
     { enabled }
   );
 }
+
+export interface SSOLoginDomainStatus {
+  domain: string;
+  verified: boolean;
+}
+
+export interface SSOLoginDomains {
+  domains: SSOLoginDomainStatus[];
+  mailboxPrefixes: string[];
+}
+
+interface SSOLoginDomainsWire {
+  domains: SSOLoginDomainStatus[];
+  mailbox_prefixes: string[];
+}
+
+function toSSOLoginDomains(wire: SSOLoginDomainsWire): SSOLoginDomains {
+  return { domains: wire.domains, mailboxPrefixes: wire.mailbox_prefixes };
+}
+
+export async function fetchSSOLoginDomains(): Promise<SSOLoginDomains> {
+  const response = await fetch(SWR_KEYS.adminSsoDomains, {
+    method: "GET",
+    headers: JSON_HEADERS,
+  });
+  if (!response.ok) throw new Error(await errorDetail(response));
+  return toSSOLoginDomains(await response.json());
+}
+
+export function sendDomainVerificationCode(
+  domain: string,
+  mailboxPrefix: string
+): Promise<{ recipient: string }> {
+  return ssoRequest<{ recipient: string }>(
+    `${SWR_KEYS.adminSsoDomains}/send-code`,
+    "POST",
+    { domain, mailbox_prefix: mailboxPrefix }
+  );
+}
+
+export async function verifyDomainViaEmail(
+  domain: string,
+  code: string
+): Promise<SSOLoginDomains> {
+  const wire = await ssoRequest<SSOLoginDomainsWire>(
+    `${SWR_KEYS.adminSsoDomains}/verify-email`,
+    "POST",
+    { domain, code }
+  );
+  return toSSOLoginDomains(wire);
+}

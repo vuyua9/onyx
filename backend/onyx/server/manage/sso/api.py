@@ -1,6 +1,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,11 @@ from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.server.manage.get_state import invalidate_sso_provider_options_cache
 from onyx.server.manage.sso.models import (
+    SSODomainSendCodeRequest,
+    SSODomainSendCodeResponse,
+    SSODomainVerifyEmailRequest,
+    SSOLoginDomainsResponse,
+    SSOLoginDomainStatus,
     SSOProviderCreateRequest,
     SSOProviderEnabledRequest,
     SSOProviderResponse,
@@ -36,6 +42,7 @@ from onyx.server.security.store import (
 from onyx.utils.encryption import reject_masked_credentials, restore_masked_credentials
 from onyx.utils.variable_functionality import fetch_ee_implementation_or_noop
 from shared_configs.configs import MULTI_TENANT
+from shared_configs.contextvars import get_current_tenant_id
 
 
 def _reject_unsupported_provider_type(provider_type: SSOProviderType) -> None:
@@ -67,6 +74,21 @@ def _validate_cloud_email_domains(allowed_email_domains: list[str] | None) -> No
             OnyxErrorCode.INVALID_INPUT,
             f"These are not valid email domains: {', '.join(invalid)}.",
         )
+
+
+def _sync_login_domain_routing(db_session: Session) -> None:
+    """Project every enabled provider's domains into the shared catalog, which
+    is the only place the login page can read before a workspace is known.
+    Recomputed from the rows rather than diffed, so a disable or a domain
+    removal stops routing without its own bookkeeping."""
+    claimed = {
+        domain
+        for provider in fetch_sso_providers(db_session, enabled_only=True)
+        for domain in provider.allowed_email_domains
+    }
+    fetch_ee_implementation_or_noop(
+        "onyx.db.tenant_sso_domain", "claim_email_domains", None
+    )(get_current_tenant_id(), sorted(claimed))
 
 
 def _reject_unfetchable_idp_url(config: dict[str, Any]) -> None:
@@ -161,6 +183,7 @@ def create_sso_provider_endpoint(
     except ValueError as e:
         raise OnyxError(OnyxErrorCode.INVALID_INPUT, str(e)) from e
 
+    _sync_login_domain_routing(db_session)
     invalidate_sso_provider_options_cache()
     return SSOProviderResponse.from_model(provider, WEB_DOMAIN)
 
@@ -200,6 +223,7 @@ def update_sso_provider_endpoint(
     except ValueError as e:
         raise OnyxError(OnyxErrorCode.INVALID_INPUT, str(e)) from e
 
+    _sync_login_domain_routing(db_session)
     invalidate_sso_provider_options_cache()
     return SSOProviderResponse.from_model(updated_provider, WEB_DOMAIN)
 
@@ -243,5 +267,80 @@ def set_sso_provider_enabled_endpoint(
                 enabled=False,
             )
 
+    _sync_login_domain_routing(db_session)
     invalidate_sso_provider_options_cache()
     return SSOProviderResponse.from_model(provider, WEB_DOMAIN)
+
+
+_ALLOWED_MAILBOX_PREFIXES = fetch_ee_implementation_or_noop(
+    "onyx.auth.sso_domain_verification", "ALLOWED_ROLE_MAILBOXES", ()
+)
+
+
+def _login_domains_response(tenant_id: str) -> SSOLoginDomainsResponse:
+    records = fetch_ee_implementation_or_noop(
+        "onyx.db.tenant_sso_domain", "list_login_domains", lambda _tenant_id: []
+    )(tenant_id)
+    return SSOLoginDomainsResponse(
+        domains=[
+            SSOLoginDomainStatus(domain=record.domain, verified=record.verified)
+            for record in records
+        ],
+        mailbox_prefixes=list(_ALLOWED_MAILBOX_PREFIXES),
+    )
+
+
+@admin_router.get("/domain")
+def list_sso_login_domains_endpoint(
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> SSOLoginDomainsResponse:
+    """A domain routes cloud logins only once verified. Declared on a provider,
+    it starts pending here until a code sent to a role mailbox proves control."""
+    if not MULTI_TENANT:
+        return SSOLoginDomainsResponse(domains=[], mailbox_prefixes=[])
+    return _login_domains_response(get_current_tenant_id())
+
+
+@admin_router.post("/domain/send-code")
+async def send_sso_domain_verification_code_endpoint(
+    payload: SSODomainSendCodeRequest,
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> SSODomainSendCodeResponse:
+    if not MULTI_TENANT:
+        raise OnyxError(OnyxErrorCode.SINGLE_TENANT_ONLY)
+
+    def _raise(*_args: Any, **_kwargs: Any) -> str:
+        raise OnyxError(OnyxErrorCode.SINGLE_TENANT_ONLY)
+
+    # SMTP send stays off the event loop.
+    recipient = await run_in_threadpool(
+        fetch_ee_implementation_or_noop(
+            "onyx.auth.sso_domain_verification", "send_domain_verification_code", _raise
+        ),
+        get_current_tenant_id(),
+        payload.domain,
+        payload.mailbox_prefix,
+    )
+    return SSODomainSendCodeResponse(recipient=recipient)
+
+
+@admin_router.post("/domain/verify-email")
+def verify_sso_domain_via_email_endpoint(
+    payload: SSODomainVerifyEmailRequest,
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+) -> SSOLoginDomainsResponse:
+    if not MULTI_TENANT:
+        raise OnyxError(OnyxErrorCode.SINGLE_TENANT_ONLY)
+
+    tenant_id = get_current_tenant_id()
+    verified = fetch_ee_implementation_or_noop(
+        "onyx.auth.sso_domain_verification",
+        "confirm_domain_verification",
+        lambda _tenant_id, _domain, _code: False,
+    )(tenant_id, payload.domain, payload.code)
+    if not verified:
+        raise OnyxError(
+            OnyxErrorCode.INVALID_INPUT, "That code is not correct or has expired."
+        )
+    invalidate_sso_provider_options_cache()
+    return _login_domains_response(tenant_id)
