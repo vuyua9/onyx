@@ -139,8 +139,8 @@ def test_lookup_returns_none_for_unknown_address() -> None:
     "domain,routable",
     [
         ("acme.example", True),
-        # A corporate domain that merely contains a consumer-domain word must
-        # route. An earlier substring match refused both of these.
+        # Substring containment must not block these: they merely contain a
+        # consumer-domain word.
         ("livenation.com", True),
         ("deliveroo.co.uk", True),
         ("gmail.com", False),
