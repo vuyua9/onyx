@@ -24,7 +24,7 @@ interface SSODomainVerificationProps {
 export default function SSODomainVerification({
   domains,
 }: SSODomainVerificationProps) {
-  const { data, mutate } = useSWR<SSOLoginDomains>(
+  const { data, mutate, isLoading } = useSWR<SSOLoginDomains>(
     SWR_KEYS.adminSsoDomains,
     fetchSSOLoginDomains
   );
@@ -39,6 +39,24 @@ export default function SSODomainVerification({
   const claimed = (data?.domains ?? []).filter((domain) =>
     domains.includes(domain.domain)
   );
+  // Keep the section header while the domain list loads so the control does not
+  // read as unavailable and then shift in. Nothing to load if no domains exist.
+  if (isLoading && domains.length > 0) {
+    return (
+      <InputVertical
+        title="Domain verification"
+        description="A domain signs your workspace's users in automatically only after you verify you own it."
+        withLabel
+      >
+        <Section flexDirection="row" alignItems="center" height="fit" gap={0.5}>
+          <SvgSimpleLoader className="size-4 animate-spin text-text-03" />
+          <Text font="main-ui-body" color="text-03">
+            Loading domains…
+          </Text>
+        </Section>
+      </InputVertical>
+    );
+  }
   if (claimed.length === 0) return null;
 
   function openVerify(domain: string) {

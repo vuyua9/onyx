@@ -40,9 +40,12 @@ from onyx.server.security.store import (
     security_settings_write_lock,
 )
 from onyx.utils.encryption import reject_masked_credentials, restore_masked_credentials
+from onyx.utils.logger import setup_logger
 from onyx.utils.variable_functionality import fetch_ee_implementation_or_noop
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.contextvars import get_current_tenant_id
+
+logger = setup_logger()
 
 
 def _reject_unsupported_provider_type(provider_type: SSOProviderType) -> None:
@@ -86,9 +89,15 @@ def _sync_login_domain_routing(db_session: Session) -> None:
         for provider in fetch_sso_providers(db_session, enabled_only=True)
         for domain in provider.allowed_email_domains
     }
-    fetch_ee_implementation_or_noop(
-        "onyx.db.tenant_sso_domain", "claim_email_domains", None
-    )(get_current_tenant_id(), sorted(claimed))
+    try:
+        fetch_ee_implementation_or_noop(
+            "onyx.db.tenant_sso_domain", "claim_email_domains", None
+        )(get_current_tenant_id(), sorted(claimed))
+    except Exception:
+        # The provider commits first and is the source of truth, so this separate
+        # catalog projection is best-effort. A transient failure must not fail a
+        # saved provider, and the next save re-syncs.
+        logger.exception("Failed to project SSO login-domain routing")
 
 
 def _reject_unfetchable_idp_url(config: dict[str, Any]) -> None:
