@@ -398,21 +398,6 @@ def verify_email_in_whitelist(
             verify_email_is_invited(email)
 
 
-def _is_established_web_member(
-    db_session: Session,
-    email: str,
-    oauth_name: str,
-    account_id: str,
-) -> bool:
-    """Whether this address is already a real member of the current workspace,
-    by address or by a linked subject. A permission-sync placeholder does not
-    count until the person actually joins."""
-    member = get_user_by_email(email, db_session)
-    if member is None:
-        member = get_user_by_oauth_account(oauth_name, account_id, db_session)
-    return member is not None and member.account_type.is_web_login()
-
-
 def verify_email_domain(
     email: str,
     *,
@@ -1025,14 +1010,13 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
 
             if override is not None and enforce_verified_domain:
                 # A tenant-controlled IdP can assert any address, so it may only
-                # provision or move a membership for a domain this workspace has
-                # verified. Established members joined by a vetted path, so exempt.
-                established = await db_session.run_sync(
-                    lambda sync_session: _is_established_web_member(
-                        sync_session, account_email, oauth_name, account_id
-                    )
-                )
-                if not established and not fetch_ee_implementation_or_noop(
+                # provision or move a membership for a verified domain. Only a
+                # current active member is exempt, so a retired one cannot be
+                # reactivated on a domain the workspace has not verified.
+                already_member = fetch_ee_implementation_or_noop(
+                    "onyx.db.user_tenant_mapping", "is_active_member", False
+                )(tenant_id, account_email, oauth_name, account_id)
+                if not already_member and not fetch_ee_implementation_or_noop(
                     "onyx.db.tenant_sso_domain", "is_email_domain_verified", False
                 )(tenant_id, account_email):
                     raise OnyxError(

@@ -219,6 +219,30 @@ def user_owns_a_tenant(email: str) -> bool:
         return result is not None
 
 
+def is_active_member(
+    tenant_id: str, email: str, oauth_name: str, account_id: str
+) -> bool:
+    """Whether this login is already an active member of tenant_id, by address
+    or by a subject linked to an active membership here. A retired (inactive)
+    membership does not count, so it cannot be reactivated on an unverified
+    domain."""
+    if not MULTI_TENANT:
+        return False
+
+    normalized_email = email.lower()
+    with get_catalog_session() as db_session:
+        by_email = db_session.scalar(
+            select(UserTenantMapping.tenant_id).where(
+                UserTenantMapping.email == normalized_email,
+                UserTenantMapping.tenant_id == tenant_id,
+                UserTenantMapping.active.is_(True),
+            )
+        )
+    if by_email is not None:
+        return True
+    return get_tenant_id_for_oauth_account(oauth_name, account_id) == tenant_id
+
+
 def ensure_tenant_membership(
     email: str, tenant_id: str, oauth_name: str, account_id: str
 ) -> None:
@@ -258,25 +282,42 @@ def ensure_tenant_membership(
 def _relink_subject_to_active_membership(
     email: str, tenant_id: str, oauth_name: str, account_id: str
 ) -> None:
-    """Move this login's subject onto its active membership when it still points
-    at one the user has left. Only a retired (inactive) source is moved, so an
-    active membership never has its subject pulled away."""
+    """Move this login's own subject onto its active membership when it still
+    points at one the user has left. The subject is moved only off a retired row
+    filed under the same address, under a lock, so a tenant-local provider-name
+    collision or a concurrently-activated row is left alone."""
     with get_catalog_session() as db_session:
         link = db_session.scalar(
-            select(UserTenantMappingOAuthAccount).where(
+            select(UserTenantMappingOAuthAccount)
+            .where(
                 UserTenantMappingOAuthAccount.oauth_name == oauth_name,
                 UserTenantMappingOAuthAccount.account_id == account_id,
             )
+            .with_for_update()
         )
-        if link is None or (link.email, link.tenant_id) == (email, tenant_id):
+        # A different address on the link is another user's subject reached
+        # through a colliding (oauth_name, account_id), never this login's.
+        if link is None or link.email != email or link.tenant_id == tenant_id:
             return
-        source_active = db_session.scalar(
-            select(UserTenantMapping.active).where(
-                UserTenantMapping.email == link.email,
-                UserTenantMapping.tenant_id == link.tenant_id,
+        # Lock both memberships so a concurrent accept cannot flip active between
+        # the check and the move.
+        rows = db_session.scalars(
+            select(UserTenantMapping)
+            .where(
+                UserTenantMapping.email == email,
+                UserTenantMapping.tenant_id.in_([link.tenant_id, tenant_id]),
             )
-        )
-        if source_active:
+            .with_for_update()
+        ).all()
+        by_tenant = {row.tenant_id: row for row in rows}
+        destination = by_tenant.get(tenant_id)
+        source = by_tenant.get(link.tenant_id)
+        if (
+            destination is None
+            or not destination.active
+            or source is None
+            or source.active
+        ):
             return
         link.email = email
         link.tenant_id = tenant_id
