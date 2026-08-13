@@ -23,15 +23,24 @@ from ee.onyx.auth.sso_domain_verification import (
 )
 from ee.onyx.db.tenant_sso_domain import (
     claim_email_domains,
+    is_email_domain_verified,
     is_routable_email_domain,
     lookup_tenant_id_for_email_domain,
+    mark_domain_verified,
 )
-from ee.onyx.db.user_tenant_mapping import lookup_tenant_id_for_login
+from ee.onyx.db.user_tenant_mapping import (
+    ensure_tenant_membership,
+    lookup_tenant_id_for_login,
+)
 from onyx.auth.sso_tenant_token import (
     decode_sso_tenant_token,
     generate_sso_tenant_token,
 )
-from onyx.db.models import TenantSSODomain, UserTenantMapping
+from onyx.db.models import (
+    TenantSSODomain,
+    UserTenantMapping,
+    UserTenantMappingOAuthAccount,
+)
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError, register_onyx_exception_handlers
 from onyx.server.sso_discovery import router as sso_discovery_router
@@ -431,3 +440,89 @@ def test_resolved_workspace_authorize_urls_carry_a_workspace_pin(
     [provider] = response.json()["providers"]
     assert provider["authorize_url"].startswith("/api/auth/oidc/okta/authorize?")
     assert "workspace_token=" in provider["authorize_url"]
+
+
+@patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
+def test_is_email_domain_verified_only_after_verification(
+    catalog_with_domains: Session,
+) -> None:
+    """A tenant-controlled IdP may vouch for an address only once the workspace
+    has verified its domain, so a pending claim and another workspace's
+    verification must both read as unverified."""
+    tenant_id = f"tenant_{uuid4().hex[:12]}"
+    other_tenant = f"tenant_{uuid4().hex[:12]}"
+    domain = f"acme-{uuid4().hex[:8]}.example"
+    try:
+        claim_email_domains(tenant_id, [domain])
+        assert is_email_domain_verified(tenant_id, f"user@{domain}") is False
+
+        mark_domain_verified(tenant_id, domain)
+        assert is_email_domain_verified(tenant_id, f"user@{domain}") is True
+
+        # Verification belongs to the workspace that proved control, not to any
+        # workspace that merely lists the domain.
+        assert is_email_domain_verified(other_tenant, f"user@{domain}") is False
+        # An unknown domain and a malformed address are both unverified.
+        assert is_email_domain_verified(tenant_id, "user@unclaimed.example") is False
+        assert is_email_domain_verified(tenant_id, "no-at-sign") is False
+    finally:
+        _clear_domains(catalog_with_domains, tenant_id)
+
+
+@pytest.fixture()
+def catalog_with_oauth(catalog_session: Session) -> Generator[Session, None, None]:
+    """The OAuth-subject link table lives in the multi-tenant catalog, which a
+    single-tenant dev database never creates."""
+    bind = catalog_session.get_bind()
+    table = cast(Table, UserTenantMappingOAuthAccount.__table__)
+    created_here = not inspect(bind).has_table(table.name, schema="public")
+    if created_here:
+        table.create(bind=bind)
+        catalog_session.commit()
+    try:
+        yield catalog_session
+    finally:
+        if created_here:
+            catalog_session.rollback()
+            table.drop(bind=bind)
+            catalog_session.commit()
+
+
+@patch("ee.onyx.db.user_tenant_mapping.MULTI_TENANT", True)
+def test_ensure_membership_moves_subject_off_retired_row(
+    catalog_with_oauth: Session,
+) -> None:
+    """After an admin move the address is active in the new workspace while its
+    subject can still point at the retired one. A vouching login must pull the
+    subject onto the active membership, or resolution by subject keeps naming
+    the old workspace once the address is renamed."""
+    email = _new_email()
+    old_tenant = f"tenant_{uuid4().hex[:12]}"
+    new_tenant = f"tenant_{uuid4().hex[:12]}"
+    oauth_name, account_id = "oidc", uuid4().hex
+    try:
+        _add_mapping(catalog_with_oauth, email, old_tenant, active=False)
+        _add_mapping(catalog_with_oauth, email, new_tenant, active=True)
+        catalog_with_oauth.add(
+            UserTenantMappingOAuthAccount(
+                oauth_name=oauth_name,
+                account_id=account_id,
+                email=email,
+                tenant_id=old_tenant,
+            )
+        )
+        catalog_with_oauth.commit()
+
+        ensure_tenant_membership(email, new_tenant, oauth_name, account_id)
+
+        catalog_with_oauth.expire_all()
+        link = catalog_with_oauth.scalar(
+            select(UserTenantMappingOAuthAccount).where(
+                UserTenantMappingOAuthAccount.oauth_name == oauth_name,
+                UserTenantMappingOAuthAccount.account_id == account_id,
+            )
+        )
+        assert link is not None
+        assert (link.email, link.tenant_id) == (email, new_tenant)
+    finally:
+        _cleanup(catalog_with_oauth, email)

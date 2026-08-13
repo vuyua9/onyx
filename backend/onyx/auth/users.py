@@ -398,6 +398,21 @@ def verify_email_in_whitelist(
             verify_email_is_invited(email)
 
 
+def _is_established_web_member(
+    db_session: Session,
+    email: str,
+    oauth_name: str,
+    account_id: str,
+) -> bool:
+    """Whether this address is already a real member of the current workspace,
+    by address or by a linked subject. A permission-sync placeholder does not
+    count until the person actually joins."""
+    member = get_user_by_email(email, db_session)
+    if member is None:
+        member = get_user_by_oauth_account(oauth_name, account_id, db_session)
+    return member is not None and member.account_type.is_web_login()
+
+
 def verify_email_domain(
     email: str,
     *,
@@ -969,6 +984,7 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         associate_by_email: bool = False,
         is_verified_by_default: bool = False,
         allowed_email_domains_override: Sequence[str] | None = None,
+        enforce_verified_domain: bool = False,
     ) -> User:
         referral_source = (
             getattr(request.state, "referral_source", None) if request else None
@@ -1006,6 +1022,24 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
                 account_email,
                 valid_email_domains=effective_valid_email_domains,
             )
+
+            if override is not None and enforce_verified_domain:
+                # A tenant-controlled IdP can assert any address, so it may only
+                # provision or move a membership for a domain this workspace has
+                # verified. Established members joined by a vetted path, so exempt.
+                established = await db_session.run_sync(
+                    lambda sync_session: _is_established_web_member(
+                        sync_session, account_email, oauth_name, account_id
+                    )
+                )
+                if not established and not fetch_ee_implementation_or_noop(
+                    "onyx.db.tenant_sso_domain", "is_email_domain_verified", False
+                )(tenant_id, account_email):
+                    raise OnyxError(
+                        OnyxErrorCode.UNAUTHORIZED,
+                        "This workspace has not verified your email domain for "
+                        "single sign-on.",
+                    )
 
             # NOTE(rkuo): If this UserManager is instantiated per connection
             # should we even be doing this here?
@@ -2558,6 +2592,7 @@ async def complete_login_flow(
     associate_by_email: bool,
     is_verified_by_default: bool,
     allowed_email_domains_override: Sequence[str] | None = None,
+    enforce_verified_domain: bool = False,
 ) -> RedirectResponse:
     """Shared post-token OAuth/OIDC login: read the verified identity, create or
     authenticate the user, and return a web or mobile redirect.
@@ -2618,6 +2653,7 @@ async def complete_login_flow(
             associate_by_email=associate_by_email,
             is_verified_by_default=is_verified_by_default,
             allowed_email_domains_override=allowed_email_domains_override,  # ty: ignore[unknown-argument]
+            enforce_verified_domain=enforce_verified_domain,  # ty: ignore[unknown-argument]
         )
     except UserAlreadyExists:
         raise OnyxError(

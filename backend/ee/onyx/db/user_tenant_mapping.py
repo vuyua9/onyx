@@ -246,6 +246,41 @@ def ensure_tenant_membership(
 
     if needs_activation:
         accept_user_invite(normalized_email, tenant_id, [(oauth_name, account_id)])
+    elif mapping is not None:
+        # accept_user_invite does not run for an already-active row, so its
+        # subject move must happen here. An admin move can strand the subject on
+        # the retired row, which record_oauth_identity never re-links.
+        _relink_subject_to_active_membership(
+            normalized_email, tenant_id, oauth_name, account_id
+        )
+
+
+def _relink_subject_to_active_membership(
+    email: str, tenant_id: str, oauth_name: str, account_id: str
+) -> None:
+    """Move this login's subject onto its active membership when it still points
+    at one the user has left. Only a retired (inactive) source is moved, so an
+    active membership never has its subject pulled away."""
+    with get_catalog_session() as db_session:
+        link = db_session.scalar(
+            select(UserTenantMappingOAuthAccount).where(
+                UserTenantMappingOAuthAccount.oauth_name == oauth_name,
+                UserTenantMappingOAuthAccount.account_id == account_id,
+            )
+        )
+        if link is None or (link.email, link.tenant_id) == (email, tenant_id):
+            return
+        source_active = db_session.scalar(
+            select(UserTenantMapping.active).where(
+                UserTenantMapping.email == link.email,
+                UserTenantMapping.tenant_id == link.tenant_id,
+            )
+        )
+        if source_active:
+            return
+        link.email = email
+        link.tenant_id = tenant_id
+        db_session.commit()
 
 
 def record_oauth_identity(

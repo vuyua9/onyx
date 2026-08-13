@@ -103,6 +103,35 @@ def lookup_tenant_id_for_email_domain(email: str) -> str | None:
         )
 
 
+def is_email_domain_verified(tenant_id: str, email: str) -> bool:
+    """Whether this workspace has proven control of the address's domain.
+
+    A tenant-controlled IdP can assert any address, so a login through one is
+    trusted to provision or move a membership only for a domain the workspace
+    has verified. An address whose domain this workspace has not verified
+    returns False.
+    """
+    if not MULTI_TENANT:
+        return False
+
+    _, _, domain = email.rpartition("@")
+    domain = domain.strip().lower()
+    if not domain:
+        return False
+
+    with get_catalog_session() as db_session:
+        return (
+            db_session.scalar(
+                select(TenantSSODomain.tenant_id).where(
+                    TenantSSODomain.tenant_id == tenant_id,
+                    TenantSSODomain.domain == domain,
+                    TenantSSODomain.verified_at.isnot(None),
+                )
+            )
+            is not None
+        )
+
+
 def claim_email_domains(tenant_id: str, domains: list[str]) -> None:
     """Record this workspace's pending claim on the domains it declares, and drop
     any it no longer claims.
