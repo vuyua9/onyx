@@ -8,11 +8,11 @@ guessed, and verifying flips the catalog row that lets the domain route.
 """
 
 import html
-import re
 import secrets
 
 from ee.onyx.db.tenant_sso_domain import is_claimed_domain, mark_domain_verified
 from onyx.auth.email_utils import send_email
+from onyx.db.sso_provider import is_valid_email_domain
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.redis.redis_pool import (
@@ -42,12 +42,6 @@ _ATTEMPTS_KEY = "sso_domain_verify:{domain}:attempts"
 _SENDS_KEY = "sso_domain_verify:{domain}:sends"
 _GLOBAL_SENDS_KEY = "sso_domain_verify:{domain}:sends_all"
 
-# A stored domain becomes an email recipient, so reject one that is not a
-# syntactically valid hostname before it lands in the To and Subject fields.
-_VALID_DOMAIN = re.compile(
-    r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$"
-)
-
 
 def _generate_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
@@ -71,7 +65,7 @@ def send_domain_verification_code(
     was sent to. Overwrites any code in flight, so a resend invalidates the old
     one and resets the attempt count."""
     domain = domain.strip().lower()
-    if not _VALID_DOMAIN.match(domain):
+    if not is_valid_email_domain(domain):
         raise OnyxError(
             OnyxErrorCode.INVALID_INPUT, "That is not a valid email domain."
         )
