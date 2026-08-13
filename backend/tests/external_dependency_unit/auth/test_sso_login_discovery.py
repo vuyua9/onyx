@@ -29,7 +29,6 @@ from ee.onyx.db.tenant_sso_domain import (
     mark_domain_verified,
 )
 from ee.onyx.db.user_tenant_mapping import (
-    ensure_tenant_membership,
     is_active_member,
     lookup_tenant_id_for_login,
 )
@@ -487,89 +486,6 @@ def catalog_with_oauth(catalog_session: Session) -> Generator[Session, None, Non
             catalog_session.rollback()
             table.drop(bind=bind)
             catalog_session.commit()
-
-
-@patch("ee.onyx.db.user_tenant_mapping.MULTI_TENANT", True)
-def test_ensure_membership_moves_subject_off_retired_row(
-    catalog_with_oauth: Session,
-) -> None:
-    """After an admin move the address is active in the new workspace while its
-    subject can still point at the retired one. A vouching login must pull the
-    subject onto the active membership, or resolution by subject keeps naming
-    the old workspace once the address is renamed."""
-    email = _new_email()
-    old_tenant = f"tenant_{uuid4().hex[:12]}"
-    new_tenant = f"tenant_{uuid4().hex[:12]}"
-    oauth_name, account_id = "oidc", uuid4().hex
-    try:
-        _add_mapping(catalog_with_oauth, email, old_tenant, active=False)
-        _add_mapping(catalog_with_oauth, email, new_tenant, active=True)
-        catalog_with_oauth.add(
-            UserTenantMappingOAuthAccount(
-                oauth_name=oauth_name,
-                account_id=account_id,
-                email=email,
-                tenant_id=old_tenant,
-            )
-        )
-        catalog_with_oauth.commit()
-
-        ensure_tenant_membership(email, new_tenant, oauth_name, account_id)
-
-        catalog_with_oauth.expire_all()
-        link = catalog_with_oauth.scalar(
-            select(UserTenantMappingOAuthAccount).where(
-                UserTenantMappingOAuthAccount.oauth_name == oauth_name,
-                UserTenantMappingOAuthAccount.account_id == account_id,
-            )
-        )
-        assert link is not None
-        assert (link.email, link.tenant_id) == (email, new_tenant)
-    finally:
-        _cleanup(catalog_with_oauth, email)
-
-
-@patch("ee.onyx.db.user_tenant_mapping.MULTI_TENANT", True)
-def test_relink_ignores_a_colliding_foreign_subject(
-    catalog_with_oauth: Session,
-) -> None:
-    """Provider names are tenant-local, so two workspaces can issue the same
-    (oauth_name, account_id). A vouching login must not pull a subject filed
-    under a different address onto its own membership."""
-    victim_email = _new_email()
-    attacker_email = _new_email()
-    victim_tenant = f"tenant_{uuid4().hex[:12]}"
-    attacker_tenant = f"tenant_{uuid4().hex[:12]}"
-    oauth_name, account_id = "oidc", uuid4().hex
-    try:
-        _add_mapping(catalog_with_oauth, victim_email, victim_tenant, active=False)
-        _add_mapping(catalog_with_oauth, attacker_email, attacker_tenant, active=True)
-        catalog_with_oauth.add(
-            UserTenantMappingOAuthAccount(
-                oauth_name=oauth_name,
-                account_id=account_id,
-                email=victim_email,
-                tenant_id=victim_tenant,
-            )
-        )
-        catalog_with_oauth.commit()
-
-        ensure_tenant_membership(
-            attacker_email, attacker_tenant, oauth_name, account_id
-        )
-
-        catalog_with_oauth.expire_all()
-        link = catalog_with_oauth.scalar(
-            select(UserTenantMappingOAuthAccount).where(
-                UserTenantMappingOAuthAccount.oauth_name == oauth_name,
-                UserTenantMappingOAuthAccount.account_id == account_id,
-            )
-        )
-        assert link is not None
-        assert (link.email, link.tenant_id) == (victim_email, victim_tenant)
-    finally:
-        _cleanup(catalog_with_oauth, victim_email)
-        _cleanup(catalog_with_oauth, attacker_email)
 
 
 @patch("ee.onyx.db.user_tenant_mapping.MULTI_TENANT", True)

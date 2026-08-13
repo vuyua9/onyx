@@ -270,58 +270,6 @@ def ensure_tenant_membership(
 
     if needs_activation:
         accept_user_invite(normalized_email, tenant_id, [(oauth_name, account_id)])
-    elif mapping is not None:
-        # accept_user_invite does not run for an already-active row, so its
-        # subject move must happen here. An admin move can strand the subject on
-        # the retired row, which record_oauth_identity never re-links.
-        _relink_subject_to_active_membership(
-            normalized_email, tenant_id, oauth_name, account_id
-        )
-
-
-def _relink_subject_to_active_membership(
-    email: str, tenant_id: str, oauth_name: str, account_id: str
-) -> None:
-    """Move this login's own subject onto its active membership when it still
-    points at one the user has left. The subject is moved only off a retired row
-    filed under the same address, under a lock, so a tenant-local provider-name
-    collision or a concurrently-activated row is left alone."""
-    with get_catalog_session() as db_session:
-        link = db_session.scalar(
-            select(UserTenantMappingOAuthAccount)
-            .where(
-                UserTenantMappingOAuthAccount.oauth_name == oauth_name,
-                UserTenantMappingOAuthAccount.account_id == account_id,
-            )
-            .with_for_update()
-        )
-        # A different address on the link is another user's subject reached
-        # through a colliding (oauth_name, account_id), never this login's.
-        if link is None or link.email != email or link.tenant_id == tenant_id:
-            return
-        # Lock both memberships so a concurrent accept cannot flip active between
-        # the check and the move.
-        rows = db_session.scalars(
-            select(UserTenantMapping)
-            .where(
-                UserTenantMapping.email == email,
-                UserTenantMapping.tenant_id.in_([link.tenant_id, tenant_id]),
-            )
-            .with_for_update()
-        ).all()
-        by_tenant = {row.tenant_id: row for row in rows}
-        destination = by_tenant.get(tenant_id)
-        source = by_tenant.get(link.tenant_id)
-        if (
-            destination is None
-            or not destination.active
-            or source is None
-            or source.active
-        ):
-            return
-        link.email = email
-        link.tenant_id = tenant_id
-        db_session.commit()
 
 
 def record_oauth_identity(
