@@ -84,19 +84,19 @@ def _sync_login_domain_routing(db_session: Session) -> None:
     is the only place the login page can read before a workspace is known.
     Recomputed from the rows rather than diffed, so a disable or a domain
     removal stops routing without its own bookkeeping."""
-    claimed = {
-        domain
-        for provider in fetch_sso_providers(db_session, enabled_only=True)
-        for domain in provider.allowed_email_domains
-    }
+    # The provider commit is the source of truth, so this whole projection is
+    # best-effort: any failure reprojecting the catalog must not fail a saved
+    # provider, and the next save re-syncs.
     try:
+        claimed = {
+            domain
+            for provider in fetch_sso_providers(db_session, enabled_only=True)
+            for domain in provider.allowed_email_domains
+        }
         fetch_ee_implementation_or_noop(
             "onyx.db.tenant_sso_domain", "claim_email_domains", None
         )(get_current_tenant_id(), sorted(claimed))
     except Exception:
-        # The provider commits first and is the source of truth, so this separate
-        # catalog projection is best-effort. A transient failure must not fail a
-        # saved provider, and the next save re-syncs.
         logger.exception("Failed to project SSO login-domain routing")
 
 
