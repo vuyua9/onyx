@@ -405,12 +405,12 @@ export function SSOProviderModal({ provider, onSaved }: SSOProviderModalProps) {
                     title={
                       NEXT_PUBLIC_CLOUD_ENABLED
                         ? "Allowed Email Domains"
-                        : "Allowed Email Domains (Optional)"
+                        : "Allowed Email Domains (Recommended)"
                     }
                     description={
                       NEXT_PUBLIC_CLOUD_ENABLED
                         ? "Only emails in these domains may sign in through this provider."
-                        : "Only emails in these domains may sign in through this provider. Empty allows any."
+                        : "Only emails in these domains may sign in through this provider. Recommended, but you can leave it empty to allow any."
                     }
                     withLabel
                   >
@@ -421,9 +421,11 @@ export function SSOProviderModal({ provider, onSaved }: SSOProviderModalProps) {
                     />
                   </InputVertical>
 
-                  <SSODomainVerification
-                    domains={values.allowed_email_domains}
-                  />
+                  {NEXT_PUBLIC_CLOUD_ENABLED && (
+                    <SSODomainVerification
+                      domains={values.allowed_email_domains}
+                    />
+                  )}
 
                   {provider?.redirect_uri && (
                     <InputVertical
