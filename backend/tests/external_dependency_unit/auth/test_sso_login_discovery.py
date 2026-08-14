@@ -27,7 +27,6 @@ from ee.onyx.auth.sso_domain_verification import (
 from ee.onyx.db.tenant_sso_domain import (
     claim_email_domains,
     is_email_domain_verified,
-    is_routable_email_domain,
     lookup_tenant_id_for_email_domain,
     mark_domain_verified,
 )
@@ -136,26 +135,6 @@ def test_lookup_refuses_to_choose_between_invitations(
 @patch("ee.onyx.db.user_tenant_mapping.MULTI_TENANT", True)
 def test_lookup_returns_none_for_unknown_address() -> None:
     assert lookup_tenant_id_for_login(_new_email()) is None
-
-
-@pytest.mark.parametrize(
-    "domain,routable",
-    [
-        ("acme.example", True),
-        # Substring containment must not block these: they merely contain a
-        # consumer-domain word.
-        ("livenation.com", True),
-        ("deliveroo.co.uk", True),
-        ("gmail.com", False),
-        ("googlemail.com", False),
-        ("outlook.com", False),
-        ("proton.me", False),
-    ],
-)
-def test_only_company_domains_route(domain: str, routable: bool) -> None:
-    """A shared consumer domain would send every one of its users to whichever
-    workspace claimed it first, so it never routes."""
-    assert is_routable_email_domain(domain) is routable
 
 
 @pytest.fixture()

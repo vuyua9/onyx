@@ -31,57 +31,6 @@ from shared_configs.configs import MULTI_TENANT, POSTGRES_DEFAULT_SCHEMA
 
 logger = setup_logger()
 
-# Shared consumer domains never route: a member on one would otherwise send
-# every address on it to one workspace. Matched exactly, so a corporate domain
-# that merely contains a consumer word (livenation.com) still routes.
-PUBLIC_EMAIL_DOMAINS = frozenset(
-    {
-        "gmail.com",
-        "googlemail.com",
-        "outlook.com",
-        "outlook.fr",
-        "hotmail.com",
-        "hotmail.co.uk",
-        "hotmail.fr",
-        "live.com",
-        "live.co.uk",
-        "msn.com",
-        "yahoo.com",
-        "yahoo.co.uk",
-        "yahoo.co.in",
-        "ymail.com",
-        "icloud.com",
-        "me.com",
-        "mac.com",
-        "aol.com",
-        "proton.me",
-        "protonmail.com",
-        "pm.me",
-        "zoho.com",
-        "gmx.com",
-        "gmx.net",
-        "yandex.com",
-        "yandex.ru",
-        "mail.ru",
-        "qq.com",
-        "163.com",
-        "126.com",
-        "sina.com",
-        "foxmail.com",
-        "comcast.net",
-        "verizon.net",
-        "att.net",
-        "sbcglobal.net",
-        "cox.net",
-        "fastmail.com",
-        "hey.com",
-    }
-)
-
-
-def is_routable_email_domain(domain: str) -> bool:
-    return domain.strip().lower() not in PUBLIC_EMAIL_DOMAINS
-
 
 def lookup_tenant_id_for_email_domain(email: str) -> str | None:
     """Workspace an address routes to on its domain alone, for someone who has
@@ -91,7 +40,7 @@ def lookup_tenant_id_for_email_domain(email: str) -> str | None:
 
     _, _, domain = email.rpartition("@")
     domain = domain.strip().lower()
-    if not domain or not is_routable_email_domain(domain):
+    if not domain:
         return None
 
     with get_catalog_session() as db_session:
@@ -142,11 +91,7 @@ def claim_email_domains(tenant_id: str, domains: list[str]) -> None:
     if not MULTI_TENANT:
         return
 
-    wanted = {
-        domain.strip().lower()
-        for domain in domains
-        if domain.strip() and is_routable_email_domain(domain)
-    }
+    wanted = {domain.strip().lower() for domain in domains if domain.strip()}
 
     with get_catalog_session() as db_session:
         held = set(
