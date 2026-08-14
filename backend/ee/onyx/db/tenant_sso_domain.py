@@ -21,13 +21,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from onyx.db.engine.sql_engine import get_catalog_session, get_session_with_tenant
-from onyx.db.engine.tenant_utils import get_all_tenant_ids
 from onyx.db.models import TenantSSODomain
 from onyx.db.sso_provider import enabled_provider_domains
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.utils.logger import setup_logger
-from shared_configs.configs import MULTI_TENANT, POSTGRES_DEFAULT_SCHEMA
+from shared_configs.configs import MULTI_TENANT
 
 logger = setup_logger()
 
@@ -193,23 +192,3 @@ def reproject_tenant_login_domains(tenant_id: str) -> None:
     with get_session_with_tenant(tenant_id=tenant_id) as db_session:
         domains = enabled_provider_domains(db_session)
     claim_email_domains(tenant_id, sorted(domains))
-
-
-def reconcile_login_domain_routing() -> None:
-    """Re-project every workspace's enabled-provider domains into the catalog.
-
-    Backfills workspaces whose providers predate routing and have not been
-    re-saved since. Existing claims keep their verification.
-    """
-    if not MULTI_TENANT:
-        return
-
-    for tenant_id in get_all_tenant_ids():
-        if tenant_id == POSTGRES_DEFAULT_SCHEMA:
-            continue
-        try:
-            reproject_tenant_login_domains(tenant_id)
-        except Exception:
-            logger.exception(
-                "Failed to reconcile login domain routing for workspace %s", tenant_id
-            )
