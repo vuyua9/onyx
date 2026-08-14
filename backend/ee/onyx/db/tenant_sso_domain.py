@@ -31,14 +31,19 @@ from shared_configs.configs import MULTI_TENANT
 logger = setup_logger()
 
 
+def _email_domain(email: str) -> str | None:
+    """The normalized domain of an address, or None when it has none."""
+    _, _, domain = email.rpartition("@")
+    return domain.strip().lower() or None
+
+
 def lookup_tenant_id_for_email_domain(email: str) -> str | None:
     """Workspace an address routes to on its domain alone, for someone who has
     no account yet. Only verified domains route."""
     if not MULTI_TENANT:
         return None
 
-    _, _, domain = email.rpartition("@")
-    domain = domain.strip().lower()
+    domain = _email_domain(email)
     if not domain:
         return None
 
@@ -62,8 +67,7 @@ def is_email_domain_verified(tenant_id: str, email: str) -> bool:
     if not MULTI_TENANT:
         return False
 
-    _, _, domain = email.rpartition("@")
-    domain = domain.strip().lower()
+    domain = _email_domain(email)
     if not domain:
         return False
 

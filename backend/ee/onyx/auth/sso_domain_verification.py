@@ -52,9 +52,32 @@ def verification_record(tenant_id: str, domain: str) -> tuple[str, str]:
     return host, f"{_VALUE_PREFIX}{_domain_token(tenant_id, domain)}"
 
 
+def _txt_proof_matches(host: str, expected: str) -> bool | None:
+    """Whether `expected` is among the host's TXT answers. None on a transient
+    resolver failure, where the record's presence is unknown, so callers can
+    tell a definitive miss (NXDOMAIN, no TXT) from a resolver blip."""
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = _DNS_TIMEOUT_SECONDS
+    resolver.lifetime = _DNS_TIMEOUT_SECONDS
+    try:
+        answers = resolver.resolve(host, "TXT")
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return False
+    except DNSException:
+        return None
+    # A TXT record is one or more quoted chunks, joined before matching.
+    return any(
+        hmac.compare_digest(
+            b"".join(record.strings).decode(errors="ignore").strip(), expected
+        )
+        for record in answers
+    )
+
+
 def verify_domain_via_dns(tenant_id: str, domain: str) -> bool:
     """Resolve the TXT record and verify the domain on a match. Returns whether
-    the record was found. A miss is expected while DNS is still propagating."""
+    a matching record was found. A miss is expected while DNS is still
+    propagating."""
     domain = domain.strip().lower()
     if not is_valid_email_domain(domain):
         raise OnyxError(
@@ -67,21 +90,9 @@ def verify_domain_via_dns(tenant_id: str, domain: str) -> bool:
         )
 
     host, expected = verification_record(tenant_id, domain)
-    resolver = dns.resolver.Resolver()
-    resolver.timeout = _DNS_TIMEOUT_SECONDS
-    resolver.lifetime = _DNS_TIMEOUT_SECONDS
-    try:
-        answers = resolver.resolve(host, "TXT")
-    except DNSException:
-        # NXDOMAIN, no TXT answer, or timeout: the record is not visible yet.
-        return False
-
-    for record in answers:
-        # A TXT record is one or more quoted chunks, joined before matching.
-        value = b"".join(record.strings).decode(errors="ignore").strip()
-        if hmac.compare_digest(value, expected):
-            mark_domain_verified(tenant_id, domain)
-            return True
+    if _txt_proof_matches(host, expected):
+        mark_domain_verified(tenant_id, domain)
+        return True
     return False
 
 
@@ -92,20 +103,7 @@ def _proof_still_present(tenant_id: str, domain: str) -> bool:
     never a resolver blip."""
     domain = domain.strip().lower()
     host, expected = verification_record(tenant_id, domain)
-    resolver = dns.resolver.Resolver()
-    resolver.timeout = _DNS_TIMEOUT_SECONDS
-    resolver.lifetime = _DNS_TIMEOUT_SECONDS
-    try:
-        answers = resolver.resolve(host, "TXT")
-    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-        return False
-    except DNSException:
-        return True
-    for record in answers:
-        value = b"".join(record.strings).decode(errors="ignore").strip()
-        if hmac.compare_digest(value, expected):
-            return True
-    return False
+    return _txt_proof_matches(host, expected) is not False
 
 
 def revalidate_tenant_domains(tenant_id: str) -> None:
