@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import useSWR from "swr";
 import { Button, Card, CopyButton, Tag, Text } from "@opal/components";
+import { Hoverable } from "@opal/core";
 import { InputVertical, Section, toast } from "@opal/layouts";
 import { SvgSimpleLoader } from "@opal/icons";
 import {
@@ -25,7 +26,8 @@ function RecordRow({
   value: string;
   copyable?: boolean;
 }) {
-  return (
+  const group = useId();
+  const row = (
     <Section
       flexDirection="row"
       alignItems="center"
@@ -34,9 +36,7 @@ function RecordRow({
       gap={2}
       padding={2}
       className={
-        copyable
-          ? "group transition-colors hover:bg-background-tint-02"
-          : undefined
+        copyable ? "transition-colors hover:bg-background-tint-02" : undefined
       }
     >
       <div className="min-w-0 break-all">
@@ -48,12 +48,14 @@ function RecordRow({
         </Text>
       </div>
       {copyable && (
-        <div className="opacity-0 transition-opacity group-hover:opacity-100 no-hover:opacity-100">
+        <Hoverable.Item group={group} variant="appear-on-hover">
           <CopyButton getCopyText={() => value} size="sm" />
-        </div>
+        </Hoverable.Item>
       )}
     </Section>
   );
+
+  return copyable ? <Hoverable.Root group={group}>{row}</Hoverable.Root> : row;
 }
 
 function DomainCard({
@@ -93,21 +95,27 @@ function DomainCard({
             <Text font="secondary-body" color="text-03" as="span">
               Add this TXT record at your DNS provider, then verify.
             </Text>
-            <Section
-              flexDirection="column"
-              alignItems="stretch"
-              height="fit"
-              gap={0}
-              className="overflow-hidden rounded-12 border border-border-02 [&>*+*]:border-t [&>*+*]:border-border-01"
-            >
-              <RecordRow label="Type" value="TXT" />
-              {status.record_host && (
-                <RecordRow label="Name" value={status.record_host} copyable />
-              )}
-              {status.record_value && (
-                <RecordRow label="Value" value={status.record_value} copyable />
-              )}
-            </Section>
+            <Card border="solid" rounding="md" padding={0}>
+              <Section
+                flexDirection="column"
+                alignItems="stretch"
+                height="fit"
+                gap={0}
+                className="[&>*+*]:border-t [&>*+*]:border-border-01"
+              >
+                <RecordRow label="Type" value="TXT" />
+                {status.record_host && (
+                  <RecordRow label="Name" value={status.record_host} copyable />
+                )}
+                {status.record_value && (
+                  <RecordRow
+                    label="Value"
+                    value={status.record_value}
+                    copyable
+                  />
+                )}
+              </Section>
+            </Card>
             <Section flexDirection="row" justifyContent="end" height="fit">
               <Button
                 prominence="secondary"
