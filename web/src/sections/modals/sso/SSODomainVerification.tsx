@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { Button, Tag, Text } from "@opal/components";
+import { Button, Card, CopyButton, Tag, Text } from "@opal/components";
 import { InputVertical, Section, toast } from "@opal/layouts";
-import { SvgSimpleLoader, SvgCopy } from "@opal/icons";
+import { SvgSimpleLoader } from "@opal/icons";
 import {
   fetchDomainRecords,
   verifyDomainViaDns,
@@ -16,35 +16,103 @@ interface SSODomainVerificationProps {
   domains: string[];
 }
 
-function CopyRow({ label, value }: { label: string; value: string }) {
+function RecordRow({ label, value }: { label: string; value: string }) {
   return (
     <Section
       flexDirection="row"
-      alignItems="center"
+      alignItems="start"
       justifyContent="between"
       height="fit"
-      gap={0.5}
-      padding={0.5}
-      className="rounded-12 border border-border-02 bg-background-neutral-01"
+      gap={2}
     >
-      <Section flexDirection="column" alignItems="stretch" height="fit" gap={0}>
+      <Section
+        flexDirection="column"
+        alignItems="stretch"
+        height="fit"
+        gap={1}
+        className="min-w-0"
+      >
         <Text font="secondary-body" color="text-03" as="span">
           {label}
         </Text>
-        <Text font="main-ui-mono" color="text-04" as="span">
-          {value}
-        </Text>
+        <div className="min-w-0 break-all">
+          <Text font="main-ui-mono" color="text-04" as="span">
+            {value}
+          </Text>
+        </div>
       </Section>
-      <Button
-        prominence="tertiary"
-        size="sm"
-        icon={SvgCopy}
-        onClick={() => {
-          navigator.clipboard?.writeText(value);
-          toast.success("Copied");
-        }}
-      />
+      <CopyButton getCopyText={() => value} size="sm" />
     </Section>
+  );
+}
+
+function DomainCard({
+  status,
+  busy,
+  onVerify,
+}: {
+  status: SSOLoginDomainStatus;
+  busy: boolean;
+  onVerify: () => void;
+}) {
+  return (
+    <Card border="solid" rounding="lg">
+      <Section flexDirection="column" alignItems="stretch" height="fit" gap={3}>
+        <Section
+          flexDirection="row"
+          justifyContent="between"
+          alignItems="center"
+          height="fit"
+          gap={2}
+        >
+          <Text font="main-ui-action" color="text-05" as="span">
+            {status.domain}
+          </Text>
+          <Tag
+            color={status.verified ? "green" : "amber"}
+            title={status.verified ? "Verified" : "Pending"}
+          />
+        </Section>
+
+        {status.verified ? (
+          <Text font="secondary-body" color="text-03" as="span">
+            This domain signs its users in automatically.
+          </Text>
+        ) : (
+          <>
+            <Text font="secondary-body" color="text-03" as="span">
+              Add this TXT record at your DNS provider, then verify.
+            </Text>
+            <Card border="none" background="heavy" rounding="md" padding={3}>
+              <Section
+                flexDirection="column"
+                alignItems="stretch"
+                height="fit"
+                gap={3}
+              >
+                <RecordRow label="Type" value="TXT" />
+                {status.record_host && (
+                  <RecordRow label="Name" value={status.record_host} />
+                )}
+                {status.record_value && (
+                  <RecordRow label="Value" value={status.record_value} />
+                )}
+              </Section>
+            </Card>
+            <Section flexDirection="row" justifyContent="end" height="fit">
+              <Button
+                prominence="secondary"
+                onClick={onVerify}
+                disabled={busy}
+                icon={busy ? SvgSimpleLoader : undefined}
+              >
+                Verify domain
+              </Button>
+            </Section>
+          </>
+        )}
+      </Section>
+    </Card>
   );
 }
 
@@ -76,66 +144,6 @@ export default function SSODomainVerification({
     }
   }
 
-  function renderDomain(domain: SSOLoginDomainStatus) {
-    const busy = busyDomain === domain.domain;
-    return (
-      <Section
-        key={domain.domain}
-        flexDirection="column"
-        alignItems="stretch"
-        height="fit"
-        gap={0.5}
-        padding={0.75}
-        className="rounded-12 border border-border-02"
-      >
-        <Section
-          flexDirection="row"
-          justifyContent="between"
-          alignItems="center"
-          height="fit"
-        >
-          <Text font="main-ui-body" color="text-04" as="span">
-            {domain.domain}
-          </Text>
-          {domain.verified ? (
-            <Tag color="green" title="Verified" />
-          ) : (
-            <Tag color="amber" title="Pending" />
-          )}
-        </Section>
-
-        {!domain.verified && (
-          <Section
-            flexDirection="column"
-            alignItems="stretch"
-            height="fit"
-            gap={0.5}
-          >
-            <Text font="secondary-body" color="text-03" as="span">
-              {`Add this TXT record at your DNS provider to prove you control ${domain.domain}, then verify.`}
-            </Text>
-            <CopyRow label="Type" value="TXT" />
-            {domain.record_host && (
-              <CopyRow label="Name" value={domain.record_host} />
-            )}
-            {domain.record_value && (
-              <CopyRow label="Value" value={domain.record_value} />
-            )}
-            <Section flexDirection="row" justifyContent="end" height="fit">
-              <Button
-                onClick={() => verify(domain.domain)}
-                disabled={busy}
-                icon={busy ? SvgSimpleLoader : undefined}
-              >
-                Verify domain
-              </Button>
-            </Section>
-          </Section>
-        )}
-      </Section>
-    );
-  }
-
   const rows = data?.domains ?? [];
 
   return (
@@ -144,26 +152,23 @@ export default function SSODomainVerification({
       description="A domain signs your workspace's users in automatically only after you verify you own it. Add the DNS record below, then verify."
       withLabel
     >
-      <Section
-        flexDirection="column"
-        alignItems="stretch"
-        height="fit"
-        gap={0.5}
-      >
+      <Section flexDirection="column" alignItems="stretch" height="fit" gap={3}>
         {isLoading && rows.length === 0 ? (
-          <Section
-            flexDirection="row"
-            alignItems="center"
-            height="fit"
-            gap={0.5}
-          >
+          <Section flexDirection="row" alignItems="center" height="fit" gap={2}>
             <SvgSimpleLoader className="size-4 animate-spin text-text-03" />
             <Text font="main-ui-body" color="text-03">
               Loading…
             </Text>
           </Section>
         ) : (
-          rows.map(renderDomain)
+          rows.map((status) => (
+            <DomainCard
+              key={status.domain}
+              status={status}
+              busy={busyDomain === status.domain}
+              onVerify={() => verify(status.domain)}
+            />
+          ))
         )}
       </Section>
     </InputVertical>
