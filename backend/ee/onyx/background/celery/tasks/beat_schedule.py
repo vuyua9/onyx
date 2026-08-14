@@ -56,6 +56,9 @@ ee_beat_task_templates: list[dict] = [
         "options": {
             "priority": OnyxCeleryPriority.LOW,
             "expires": BEAT_EXPIRES_DEFAULT,
+            # Revoking stale routing is a security cleanup, so it must reach
+            # gated workspaces too, not just active ones.
+            "skip_gated": False,
         },
     },
 ]

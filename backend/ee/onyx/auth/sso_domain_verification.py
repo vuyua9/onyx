@@ -113,9 +113,15 @@ def revalidate_tenant_domains(tenant_id: str) -> None:
     whose record is gone, so a domain the workspace no longer controls stops
     routing strangers into it."""
     for record in list_login_domains(tenant_id):
-        if record.verified and not _proof_still_present(tenant_id, record.domain):
+        if not record.verified:
+            continue
+        try:
+            if _proof_still_present(tenant_id, record.domain):
+                continue
             mark_domain_unverified(tenant_id, record.domain)
             logger.info(
                 "Dropped SSO routing for %s: its TXT proof no longer resolves",
                 record.domain,
             )
+        except Exception:
+            logger.exception("Failed to re-validate SSO domain %s", record.domain)
