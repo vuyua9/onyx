@@ -11,6 +11,9 @@ from ee.onyx.auth.sso_domain_verification import revalidate_tenant_domains
 from ee.onyx.db.tenant_sso_domain import reproject_tenant_login_domains
 from onyx.configs.app_configs import JOB_TIMEOUT
 from onyx.configs.constants import OnyxCeleryTask
+from onyx.utils.logger import setup_logger
+
+logger = setup_logger()
 
 
 @shared_task(
@@ -20,6 +23,11 @@ from onyx.configs.constants import OnyxCeleryTask
     trail=False,
 )
 def revalidate_sso_domains_task(*, tenant_id: str) -> None:
-    """Fanned out per tenant by cloud_beat_task_generator."""
-    reproject_tenant_login_domains(tenant_id)
+    """Fanned out per tenant by cloud_beat_task_generator. The re-projection is
+    isolated so its failure can't skip the DNS re-check, which is the part that
+    drops routing for a domain whose proof is gone."""
+    try:
+        reproject_tenant_login_domains(tenant_id)
+    except Exception:
+        logger.exception("Failed to re-project login domains for %s", tenant_id)
     revalidate_tenant_domains(tenant_id)
