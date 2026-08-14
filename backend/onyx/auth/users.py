@@ -1009,8 +1009,7 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
             )
 
             if override is not None and enforce_verified_domain:
-                # Only a current active member is exempt from is_email_domain_verified,
-                # so a retired one cannot be reactivated on an unverified domain.
+                # Current active members are exempt from the domain gate.
                 already_member = fetch_ee_implementation_or_noop(
                     "onyx.db.user_tenant_mapping", "is_active_member", False
                 )(tenant_id, account_email, oauth_name, account_id)

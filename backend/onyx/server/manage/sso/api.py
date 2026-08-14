@@ -59,9 +59,9 @@ def _reject_unsupported_provider_type(provider_type: SSOProviderType) -> None:
 def _validate_cloud_email_domains(allowed_email_domains: list[str] | None) -> None:
     """On cloud the domain list is both the seat boundary and a routing key, so
     it must be non-empty and every entry a valid hostname. A malformed domain
-    would otherwise persist and fail only later, when its verification record is
-    built. Judged after normalization, which drops blanks. Single-tenant leaves
-    the list optional and unrouted, so it skips both checks."""
+    would otherwise persist and fail only later, at DNS verification. Judged
+    after normalization, which drops blanks. Single-tenant leaves the list
+    optional and unrouted, so it skips both checks."""
     if not MULTI_TENANT or allowed_email_domains is None:
         return
     normalized = normalize_email_domains(allowed_email_domains)
