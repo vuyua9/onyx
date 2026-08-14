@@ -16,32 +16,42 @@ interface SSODomainVerificationProps {
   domains: string[];
 }
 
-function RecordRow({ label, value }: { label: string; value: string }) {
+function RecordRow({
+  label,
+  value,
+  copyable,
+}: {
+  label: string;
+  value: string;
+  copyable?: boolean;
+}) {
   return (
     <Section
       flexDirection="row"
-      alignItems="start"
+      alignItems="center"
       justifyContent="between"
       height="fit"
       gap={2}
+      padding={2}
+      className={
+        copyable
+          ? "group transition-colors hover:bg-background-tint-02"
+          : undefined
+      }
     >
-      <Section
-        flexDirection="column"
-        alignItems="stretch"
-        height="fit"
-        gap={1}
-        className="min-w-0"
-      >
-        <Text font="secondary-body" color="text-03" as="span">
-          {label}
+      <div className="min-w-0 break-all">
+        <Text font="main-ui-body" color="text-03" as="span">
+          {`${label}: `}
         </Text>
-        <div className="min-w-0 break-all">
-          <Text font="main-ui-mono" color="text-04" as="span">
-            {value}
-          </Text>
+        <Text font="main-ui-mono" color="text-04" as="span">
+          {value}
+        </Text>
+      </div>
+      {copyable && (
+        <div className="opacity-0 transition-opacity group-hover:opacity-100 no-hover:opacity-100">
+          <CopyButton getCopyText={() => value} size="sm" />
         </div>
-      </Section>
-      <CopyButton getCopyText={() => value} size="sm" />
+      )}
     </Section>
   );
 }
@@ -83,22 +93,21 @@ function DomainCard({
             <Text font="secondary-body" color="text-03" as="span">
               Add this TXT record at your DNS provider, then verify.
             </Text>
-            <Card border="none" background="heavy" rounding="md" padding={3}>
-              <Section
-                flexDirection="column"
-                alignItems="stretch"
-                height="fit"
-                gap={3}
-              >
-                <RecordRow label="Type" value="TXT" />
-                {status.record_host && (
-                  <RecordRow label="Name" value={status.record_host} />
-                )}
-                {status.record_value && (
-                  <RecordRow label="Value" value={status.record_value} />
-                )}
-              </Section>
-            </Card>
+            <Section
+              flexDirection="column"
+              alignItems="stretch"
+              height="fit"
+              gap={0}
+              className="overflow-hidden rounded-12 border border-border-02 [&>*+*]:border-t [&>*+*]:border-border-01"
+            >
+              <RecordRow label="Type" value="TXT" />
+              {status.record_host && (
+                <RecordRow label="Name" value={status.record_host} copyable />
+              )}
+              {status.record_value && (
+                <RecordRow label="Value" value={status.record_value} copyable />
+              )}
+            </Section>
             <Section flexDirection="row" justifyContent="end" height="fit">
               <Button
                 prominence="secondary"
