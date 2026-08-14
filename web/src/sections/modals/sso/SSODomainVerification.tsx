@@ -12,6 +12,7 @@ import {
   type SSOLoginDomains,
   type SSOLoginDomainStatus,
 } from "@/lib/sso/svc";
+import { SWR_KEYS } from "@/lib/swr-keys";
 
 interface SSODomainVerificationProps {
   domains: string[];
@@ -141,7 +142,7 @@ export default function SSODomainVerification({
   domains,
 }: SSODomainVerificationProps) {
   const { data, mutate, isLoading } = useSWR<SSOLoginDomains>(
-    domains.length > 0 ? ["sso-domain-records", ...domains] : null,
+    domains.length > 0 ? SWR_KEYS.adminSsoDomainRecords(domains) : null,
     () => fetchDomainRecords(domains)
   );
   const [busyDomain, setBusyDomain] = useState<string | null>(null);
@@ -172,7 +173,7 @@ export default function SSODomainVerification({
       <Section flexDirection="column" alignItems="stretch" height="fit" gap={3}>
         {isLoading && rows.length === 0 ? (
           <Section flexDirection="row" alignItems="center" height="fit" gap={2}>
-            <SvgSimpleLoader className="size-4 animate-spin text-text-03" />
+            <SvgSimpleLoader className="text-text-03" />
             <Text font="main-ui-body" color="text-03">
               Loading…
             </Text>

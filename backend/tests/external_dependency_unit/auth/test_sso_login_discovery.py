@@ -11,6 +11,8 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import dns.exception
+import dns.resolver
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,6 +20,7 @@ from sqlalchemy import Table, delete, inspect, select
 from sqlalchemy.orm import Session
 
 from ee.onyx.auth.sso_domain_verification import (
+    revalidate_tenant_domains,
     verification_record,
     verify_domain_via_dns,
 )
@@ -250,6 +253,63 @@ def test_dns_verification_without_the_record_does_not_route(
             ]
             assert verify_domain_via_dns(tenant_id, domain) is False
         assert lookup_tenant_id_for_email_domain(f"user@{domain}") is None
+    finally:
+        _clear_domains(catalog_with_domains, tenant_id)
+
+
+@patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
+def test_revalidation_drops_a_domain_whose_record_disappeared(
+    catalog_with_domains: Session,
+) -> None:
+    """A verified domain whose TXT record is later removed stops routing, so a
+    workspace that has lost control of a domain cannot keep pulling its users."""
+    tenant_id = f"tenant_{uuid4().hex[:12]}"
+    domain = f"acme-{uuid4().hex[:8]}.com"
+    try:
+        claim_email_domains(tenant_id, [domain])
+        mark_domain_verified(tenant_id, domain)
+        assert lookup_tenant_id_for_email_domain(f"user@{domain}") == tenant_id
+        with patch("dns.resolver.Resolver") as resolver_cls:
+            resolver_cls.return_value.resolve.side_effect = dns.resolver.NXDOMAIN
+            revalidate_tenant_domains(tenant_id)
+        assert lookup_tenant_id_for_email_domain(f"user@{domain}") is None
+    finally:
+        _clear_domains(catalog_with_domains, tenant_id)
+
+
+@patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
+def test_revalidation_keeps_a_domain_whose_record_is_present(
+    catalog_with_domains: Session,
+) -> None:
+    """A verified domain whose TXT record still resolves keeps routing."""
+    tenant_id = f"tenant_{uuid4().hex[:12]}"
+    domain = f"acme-{uuid4().hex[:8]}.com"
+    try:
+        claim_email_domains(tenant_id, [domain])
+        mark_domain_verified(tenant_id, domain)
+        _host, value = verification_record(tenant_id, domain)
+        with patch("dns.resolver.Resolver") as resolver_cls:
+            resolver_cls.return_value.resolve.return_value = [_TxtRecord(value)]
+            revalidate_tenant_domains(tenant_id)
+        assert lookup_tenant_id_for_email_domain(f"user@{domain}") == tenant_id
+    finally:
+        _clear_domains(catalog_with_domains, tenant_id)
+
+
+@patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
+def test_revalidation_keeps_a_domain_on_a_transient_dns_failure(
+    catalog_with_domains: Session,
+) -> None:
+    """A resolver timeout is inconclusive, so it must not drop a good domain."""
+    tenant_id = f"tenant_{uuid4().hex[:12]}"
+    domain = f"acme-{uuid4().hex[:8]}.com"
+    try:
+        claim_email_domains(tenant_id, [domain])
+        mark_domain_verified(tenant_id, domain)
+        with patch("dns.resolver.Resolver") as resolver_cls:
+            resolver_cls.return_value.resolve.side_effect = dns.exception.Timeout
+            revalidate_tenant_domains(tenant_id)
+        assert lookup_tenant_id_for_email_domain(f"user@{domain}") == tenant_id
     finally:
         _clear_domains(catalog_with_domains, tenant_id)
 

@@ -5593,8 +5593,8 @@ class TenantSSODomain(PublicBase):
     which is per-tenant and therefore unreadable before a workspace is known.
 
     A row only routes once `verified_at` is set: a workspace proves control of
-    the domain with a code emailed to a role mailbox on it (postmaster@, admin@)
-    before strangers on the domain are routed in and auto-provisioned.
+    the domain by publishing a DNS TXT record for it before strangers on the
+    domain are routed in and auto-provisioned.
     """
 
     __tablename__ = "tenant_sso_domain"

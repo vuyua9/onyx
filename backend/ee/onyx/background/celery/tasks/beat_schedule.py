@@ -49,6 +49,15 @@ ee_beat_task_templates: list[dict] = [
             "queue": OnyxCeleryQueues.CSV_GENERATION,
         },
     },
+    {
+        "name": "revalidate-sso-domains",
+        "task": OnyxCeleryTask.REVALIDATE_SSO_DOMAINS_TASK,
+        "schedule": timedelta(hours=6),
+        "options": {
+            "priority": OnyxCeleryPriority.LOW,
+            "expires": BEAT_EXPIRES_DEFAULT,
+        },
+    },
 ]
 
 ee_tasks_to_schedule: list[dict] = []

@@ -99,15 +99,6 @@ export interface SSOLoginDomains {
   domains: SSOLoginDomainStatus[];
 }
 
-export async function fetchSSOLoginDomains(): Promise<SSOLoginDomains> {
-  const response = await fetch(SWR_KEYS.adminSsoDomains, {
-    method: "GET",
-    headers: JSON_HEADERS,
-  });
-  if (!response.ok) throw new Error(await errorDetail(response));
-  return await response.json();
-}
-
 export function fetchDomainRecords(
   domains: string[]
 ): Promise<SSOLoginDomains> {

@@ -13,6 +13,7 @@ from onyx.db.enums import Permission, SSOProviderType
 from onyx.db.models import SSOProvider, User
 from onyx.db.sso_provider import (
     create_sso_provider,
+    enabled_provider_domains,
     fetch_sso_providers,
     is_valid_email_domain,
     normalize_email_domains,
@@ -58,9 +59,9 @@ def _reject_unsupported_provider_type(provider_type: SSOProviderType) -> None:
 def _validate_cloud_email_domains(allowed_email_domains: list[str] | None) -> None:
     """On cloud the domain list is both the seat boundary and a routing key, so
     it must be non-empty and every entry a valid hostname. A malformed domain
-    would otherwise persist and fail only later, when verification tries to email
-    it. Judged after normalization, which drops blanks. Single-tenant leaves the
-    list optional and unrouted, so it skips both checks."""
+    would otherwise persist and fail only later, when its verification record is
+    built. Judged after normalization, which drops blanks. Single-tenant leaves
+    the list optional and unrouted, so it skips both checks."""
     if not MULTI_TENANT or allowed_email_domains is None:
         return
     normalized = normalize_email_domains(allowed_email_domains)
@@ -87,11 +88,7 @@ def _sync_login_domain_routing(db_session: Session) -> None:
     # best-effort: any failure reprojecting the catalog must not fail a saved
     # provider, and the next save re-syncs.
     try:
-        claimed = {
-            domain
-            for provider in fetch_sso_providers(db_session, enabled_only=True)
-            for domain in provider.allowed_email_domains
-        }
+        claimed = enabled_provider_domains(db_session)
         fetch_ee_implementation_or_noop(
             "onyx.db.tenant_sso_domain", "claim_email_domains", None
         )(get_current_tenant_id(), sorted(claimed))
@@ -280,6 +277,12 @@ def set_sso_provider_enabled_endpoint(
     return SSOProviderResponse.from_model(provider, WEB_DOMAIN)
 
 
+def _list_login_domains(tenant_id: str) -> list[Any]:
+    return fetch_ee_implementation_or_noop(
+        "onyx.db.tenant_sso_domain", "list_login_domains", lambda _tenant_id: []
+    )(tenant_id)
+
+
 def _build_statuses(
     tenant_id: str, domains: list[str], verified: set[str]
 ) -> SSOLoginDomainsResponse:
@@ -303,35 +306,20 @@ def _build_statuses(
 
 
 def _login_domains_response(tenant_id: str) -> SSOLoginDomainsResponse:
-    records = fetch_ee_implementation_or_noop(
-        "onyx.db.tenant_sso_domain", "list_login_domains", lambda _tenant_id: []
-    )(tenant_id)
+    records = _list_login_domains(tenant_id)
     verified = {record.domain for record in records if record.verified}
     return _build_statuses(tenant_id, [record.domain for record in records], verified)
 
 
 def _domain_statuses(tenant_id: str, domains: list[str]) -> SSOLoginDomainsResponse:
-    """Statuses for a specific set of domains, claimed or not, so the provider
-    modal populates verification the moment a domain is entered, before save."""
+    """Statuses for a specific set of domains, claimed or not, so verification can
+    be shown before the provider is saved. Domains are normalized so a mixed-case
+    entry matches the lowercased catalog."""
+    normalized = [domain.strip().lower() for domain in domains]
     verified = {
-        record.domain
-        for record in fetch_ee_implementation_or_noop(
-            "onyx.db.tenant_sso_domain", "list_login_domains", lambda _tenant_id: []
-        )(tenant_id)
-        if record.verified
+        record.domain for record in _list_login_domains(tenant_id) if record.verified
     }
-    return _build_statuses(tenant_id, domains, verified)
-
-
-@admin_router.get("/domain")
-def list_sso_login_domains_endpoint(
-    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
-) -> SSOLoginDomainsResponse:
-    """A domain routes cloud logins only once verified. Declared on a provider,
-    it starts pending here until a DNS TXT record proves control."""
-    if not MULTI_TENANT:
-        return SSOLoginDomainsResponse(domains=[])
-    return _login_domains_response(get_current_tenant_id())
+    return _build_statuses(tenant_id, normalized, verified)
 
 
 @admin_router.post("/domain/records")
@@ -339,8 +327,8 @@ def sso_domain_records_endpoint(
     payload: SSODomainRecordsRequest,
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> SSOLoginDomainsResponse:
-    """The TXT record and status for the domains an admin is configuring, so the
-    provider modal populates verification live as domains are added."""
+    """The TXT record and status for the domains an admin is configuring, so
+    verification can be shown before the provider is saved."""
     if not MULTI_TENANT:
         return SSOLoginDomainsResponse(domains=[])
     return _domain_statuses(get_current_tenant_id(), payload.domains)

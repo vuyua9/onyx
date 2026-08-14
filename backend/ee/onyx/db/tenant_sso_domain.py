@@ -8,7 +8,7 @@ known, so they are projected here, into the one catalog every login request can
 reach.
 
 A domain only routes once it is verified. Declaring a domain records a pending
-claim; the workspace proves control by receiving a code at a role mailbox on the
+claim. The workspace proves control by publishing a DNS TXT record for the
 domain. Until then the domain routes nowhere, so a workspace cannot pull
 addresses on a domain it has not shown it owns. Several workspaces may hold the
 same domain pending, but only one can verify it.
@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from onyx.db.engine.sql_engine import get_catalog_session, get_session_with_tenant
 from onyx.db.engine.tenant_utils import get_all_tenant_ids
 from onyx.db.models import TenantSSODomain
-from onyx.db.sso_provider import fetch_sso_providers
+from onyx.db.sso_provider import enabled_provider_domains
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.utils.logger import setup_logger
@@ -227,12 +227,34 @@ def mark_domain_verified(tenant_id: str, domain: str) -> None:
             ) from e
 
 
+def mark_domain_unverified(tenant_id: str, domain: str) -> None:
+    """Drop a domain's verification so it stops routing. The scheduled re-check
+    calls this when the domain's TXT proof is no longer resolvable."""
+    if not MULTI_TENANT:
+        return
+
+    with get_catalog_session() as db_session:
+        row = db_session.get(TenantSSODomain, (tenant_id, domain))
+        if row is None or row.verified_at is None:
+            return
+        row.verified_at = None
+        db_session.commit()
+
+
+def reproject_tenant_login_domains(tenant_id: str) -> None:
+    """Re-project one workspace's enabled-provider domains into the catalog, so a
+    disable or a domain removal stops routing even if the on-save projection
+    failed. A domain that stays claimed keeps its verification."""
+    with get_session_with_tenant(tenant_id=tenant_id) as db_session:
+        domains = enabled_provider_domains(db_session)
+    claim_email_domains(tenant_id, sorted(domains))
+
+
 def reconcile_login_domain_routing() -> None:
     """Re-project every workspace's enabled-provider domains into the catalog.
 
-    The projection is written on provider save, so this backfills workspaces
-    whose providers predate routing and have not been re-saved since. Existing
-    claims keep their verification.
+    Backfills workspaces whose providers predate routing and have not been
+    re-saved since. Existing claims keep their verification.
     """
     if not MULTI_TENANT:
         return
@@ -241,17 +263,7 @@ def reconcile_login_domain_routing() -> None:
         if tenant_id == POSTGRES_DEFAULT_SCHEMA:
             continue
         try:
-            with get_session_with_tenant(tenant_id=tenant_id) as db_session:
-                domains = sorted(
-                    {
-                        domain
-                        for provider in fetch_sso_providers(
-                            db_session, enabled_only=True
-                        )
-                        for domain in provider.allowed_email_domains
-                    }
-                )
-            claim_email_domains(tenant_id, domains)
+            reproject_tenant_login_domains(tenant_id)
         except Exception:
             logger.exception(
                 "Failed to reconcile login domain routing for workspace %s", tenant_id

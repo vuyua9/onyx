@@ -3,7 +3,7 @@
 Domain routing auto-provisions strangers on a domain, so a workspace must show
 it owns the domain first. Only whoever controls the domain's DNS can publish the
 record we look for, so finding it is that proof. Verifying flips the catalog row
-that lets the domain route; a scheduled re-check drops routing if the record
+that lets the domain route. A scheduled re-check drops routing if the record
 later disappears.
 """
 
@@ -13,7 +13,12 @@ import hmac
 import dns.resolver
 from dns.exception import DNSException
 
-from ee.onyx.db.tenant_sso_domain import is_claimed_domain, mark_domain_verified
+from ee.onyx.db.tenant_sso_domain import (
+    is_claimed_domain,
+    list_login_domains,
+    mark_domain_unverified,
+    mark_domain_verified,
+)
 from onyx.configs.app_configs import USER_AUTH_SECRET
 from onyx.db.sso_provider import is_valid_email_domain
 from onyx.error_handling.error_codes import OnyxErrorCode
@@ -32,8 +37,9 @@ _DNS_TIMEOUT_SECONDS = 5.0
 
 def _domain_token(tenant_id: str, domain: str) -> str:
     """A stable per-(workspace, domain) token. Bound to the workspace so one
-    tenant's published record cannot verify another's claim, and unguessable so
-    only someone who can read the DNS zone knows what to publish."""
+    tenant's published record cannot verify another's claim, and unguessable
+    without USER_AUTH_SECRET so an attacker cannot forge a record for a domain
+    they do not control."""
     message = f"sso-domain:{tenant_id}:{domain}".encode()
     digest = hmac.new(USER_AUTH_SECRET.encode(), message, hashlib.sha256)
     return digest.hexdigest()[:32]
@@ -77,3 +83,39 @@ def verify_domain_via_dns(tenant_id: str, domain: str) -> bool:
             mark_domain_verified(tenant_id, domain)
             return True
     return False
+
+
+def _proof_still_present(tenant_id: str, domain: str) -> bool:
+    """Re-resolve the TXT proof for an already-verified domain. Returns True when
+    the proof is present, and also on a transient resolver failure, so routing is
+    dropped only on a definitive miss (NXDOMAIN, no TXT, or a changed value),
+    never a resolver blip."""
+    domain = domain.strip().lower()
+    host, expected = verification_record(tenant_id, domain)
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = _DNS_TIMEOUT_SECONDS
+    resolver.lifetime = _DNS_TIMEOUT_SECONDS
+    try:
+        answers = resolver.resolve(host, "TXT")
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return False
+    except DNSException:
+        return True
+    for record in answers:
+        value = b"".join(record.strings).decode(errors="ignore").strip()
+        if hmac.compare_digest(value, expected):
+            return True
+    return False
+
+
+def revalidate_tenant_domains(tenant_id: str) -> None:
+    """Re-resolve each verified domain's TXT proof and drop verification for any
+    whose record is gone, so a domain the workspace no longer controls stops
+    routing strangers into it."""
+    for record in list_login_domains(tenant_id):
+        if record.verified and not _proof_still_present(tenant_id, record.domain):
+            mark_domain_unverified(tenant_id, record.domain)
+            logger.info(
+                "Dropped SSO routing for %s: its TXT proof no longer resolves",
+                record.domain,
+            )
