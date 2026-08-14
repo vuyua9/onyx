@@ -25,9 +25,8 @@ from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.server.manage.get_state import invalidate_sso_provider_options_cache
 from onyx.server.manage.sso.models import (
-    SSODomainSendCodeRequest,
-    SSODomainSendCodeResponse,
-    SSODomainVerifyEmailRequest,
+    SSODomainRecordsRequest,
+    SSODomainVerifyRequest,
     SSOLoginDomainsResponse,
     SSOLoginDomainStatus,
     SSOProviderCreateRequest,
@@ -281,22 +280,47 @@ def set_sso_provider_enabled_endpoint(
     return SSOProviderResponse.from_model(provider, WEB_DOMAIN)
 
 
-_ALLOWED_MAILBOX_PREFIXES = fetch_ee_implementation_or_noop(
-    "onyx.auth.sso_domain_verification", "ALLOWED_ROLE_MAILBOXES", ()
-)
+def _build_statuses(
+    tenant_id: str, domains: list[str], verified: set[str]
+) -> SSOLoginDomainsResponse:
+    """Pair each domain with its status. A verified domain routes and needs no
+    record. A pending one carries the TXT record to publish."""
+    verification_record = fetch_ee_implementation_or_noop(
+        "onyx.auth.sso_domain_verification",
+        "verification_record",
+        lambda _tenant_id, _domain: (None, None),
+    )
+
+    def _status(domain: str) -> SSOLoginDomainStatus:
+        if domain in verified:
+            return SSOLoginDomainStatus(domain=domain, verified=True)
+        host, value = verification_record(tenant_id, domain)
+        return SSOLoginDomainStatus(
+            domain=domain, verified=False, record_host=host, record_value=value
+        )
+
+    return SSOLoginDomainsResponse(domains=[_status(domain) for domain in domains])
 
 
 def _login_domains_response(tenant_id: str) -> SSOLoginDomainsResponse:
     records = fetch_ee_implementation_or_noop(
         "onyx.db.tenant_sso_domain", "list_login_domains", lambda _tenant_id: []
     )(tenant_id)
-    return SSOLoginDomainsResponse(
-        domains=[
-            SSOLoginDomainStatus(domain=record.domain, verified=record.verified)
-            for record in records
-        ],
-        mailbox_prefixes=list(_ALLOWED_MAILBOX_PREFIXES),
-    )
+    verified = {record.domain for record in records if record.verified}
+    return _build_statuses(tenant_id, [record.domain for record in records], verified)
+
+
+def _domain_statuses(tenant_id: str, domains: list[str]) -> SSOLoginDomainsResponse:
+    """Statuses for a specific set of domains, claimed or not, so the provider
+    modal populates verification the moment a domain is entered, before save."""
+    verified = {
+        record.domain
+        for record in fetch_ee_implementation_or_noop(
+            "onyx.db.tenant_sso_domain", "list_login_domains", lambda _tenant_id: []
+        )(tenant_id)
+        if record.verified
+    }
+    return _build_statuses(tenant_id, domains, verified)
 
 
 @admin_router.get("/domain")
@@ -304,52 +328,48 @@ def list_sso_login_domains_endpoint(
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> SSOLoginDomainsResponse:
     """A domain routes cloud logins only once verified. Declared on a provider,
-    it starts pending here until a code sent to a role mailbox proves control."""
+    it starts pending here until a DNS TXT record proves control."""
     if not MULTI_TENANT:
-        return SSOLoginDomainsResponse(domains=[], mailbox_prefixes=[])
+        return SSOLoginDomainsResponse(domains=[])
     return _login_domains_response(get_current_tenant_id())
 
 
-@admin_router.post("/domain/send-code")
-async def send_sso_domain_verification_code_endpoint(
-    payload: SSODomainSendCodeRequest,
+@admin_router.post("/domain/records")
+def sso_domain_records_endpoint(
+    payload: SSODomainRecordsRequest,
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
-) -> SSODomainSendCodeResponse:
+) -> SSOLoginDomainsResponse:
+    """The TXT record and status for the domains an admin is configuring, so the
+    provider modal populates verification live as domains are added."""
     if not MULTI_TENANT:
-        raise OnyxError(OnyxErrorCode.SINGLE_TENANT_ONLY)
-
-    def _raise(*_args: Any, **_kwargs: Any) -> str:
-        raise OnyxError(OnyxErrorCode.SINGLE_TENANT_ONLY)
-
-    # SMTP send stays off the event loop.
-    recipient = await run_in_threadpool(
-        fetch_ee_implementation_or_noop(
-            "onyx.auth.sso_domain_verification", "send_domain_verification_code", _raise
-        ),
-        get_current_tenant_id(),
-        payload.domain,
-        payload.mailbox_prefix,
-    )
-    return SSODomainSendCodeResponse(recipient=recipient)
+        return SSOLoginDomainsResponse(domains=[])
+    return _domain_statuses(get_current_tenant_id(), payload.domains)
 
 
-@admin_router.post("/domain/verify-email")
-def verify_sso_domain_via_email_endpoint(
-    payload: SSODomainVerifyEmailRequest,
+@admin_router.post("/domain/verify-dns")
+async def verify_sso_domain_via_dns_endpoint(
+    payload: SSODomainVerifyRequest,
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> SSOLoginDomainsResponse:
     if not MULTI_TENANT:
         raise OnyxError(OnyxErrorCode.SINGLE_TENANT_ONLY)
 
     tenant_id = get_current_tenant_id()
-    verified = fetch_ee_implementation_or_noop(
-        "onyx.auth.sso_domain_verification",
-        "confirm_domain_verification",
-        lambda _tenant_id, _domain, _code: False,
-    )(tenant_id, payload.domain, payload.code)
-    if not verified:
+    # DNS resolution blocks, so keep it off the event loop.
+    found = await run_in_threadpool(
+        fetch_ee_implementation_or_noop(
+            "onyx.auth.sso_domain_verification",
+            "verify_domain_via_dns",
+            lambda _tenant_id, _domain: False,
+        ),
+        tenant_id,
+        payload.domain,
+    )
+    if not found:
         raise OnyxError(
-            OnyxErrorCode.INVALID_INPUT, "That code is not correct or has expired."
+            OnyxErrorCode.INVALID_INPUT,
+            "We couldn't find the TXT record yet. DNS can take up to an hour to "
+            "update, then check again.",
         )
     invalidate_sso_provider_options_cache()
     return _login_domains_response(tenant_id)

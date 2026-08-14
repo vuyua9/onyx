@@ -2,104 +2,146 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { Button, InputTypeIn, Tag, Text } from "@opal/components";
+import { Button, Tag, Text } from "@opal/components";
 import { InputVertical, Section, toast } from "@opal/layouts";
-import { SvgSimpleLoader } from "@opal/icons";
-import InputSelect from "@/refresh-components/inputs/InputSelect";
-import { SWR_KEYS } from "@/lib/swr-keys";
+import { SvgSimpleLoader, SvgCopy } from "@opal/icons";
 import {
-  fetchSSOLoginDomains,
-  sendDomainVerificationCode,
-  verifyDomainViaEmail,
+  fetchDomainRecords,
+  verifyDomainViaDns,
   type SSOLoginDomains,
+  type SSOLoginDomainStatus,
 } from "@/lib/sso/svc";
 
 interface SSODomainVerificationProps {
   domains: string[];
 }
 
+function CopyRow({ label, value }: { label: string; value: string }) {
+  return (
+    <Section
+      flexDirection="row"
+      alignItems="center"
+      justifyContent="between"
+      height="fit"
+      gap={0.5}
+      padding={0.5}
+      className="rounded-12 border border-border-02 bg-background-neutral-01"
+    >
+      <Section flexDirection="column" alignItems="stretch" height="fit" gap={0}>
+        <Text font="secondary-body" color="text-03" as="span">
+          {label}
+        </Text>
+        <Text font="main-ui-mono" color="text-04" as="span">
+          {value}
+        </Text>
+      </Section>
+      <Button
+        prominence="tertiary"
+        size="sm"
+        icon={SvgCopy}
+        onClick={() => {
+          navigator.clipboard?.writeText(value);
+          toast.success("Copied");
+        }}
+      />
+    </Section>
+  );
+}
+
 // Cloud only: a domain auto-provisions strangers on it, so it routes no one
-// until the workspace proves it owns the domain with a code to a role mailbox.
-// The list self-gates: the endpoint returns nothing off cloud, so nothing renders.
+// until the workspace proves it owns the domain by publishing a DNS TXT record.
+// Records populate for the domains being configured, whether or not the provider
+// is saved yet, so setup is one pass.
 export default function SSODomainVerification({
   domains,
 }: SSODomainVerificationProps) {
   const { data, mutate, isLoading } = useSWR<SSOLoginDomains>(
-    SWR_KEYS.adminSsoDomains,
-    fetchSSOLoginDomains
+    domains.length > 0 ? ["sso-domain-records", ...domains] : null,
+    () => fetchDomainRecords(domains)
   );
+  const [busyDomain, setBusyDomain] = useState<string | null>(null);
 
-  const [activeDomain, setActiveDomain] = useState<string | null>(null);
-  const [mailboxPrefix, setMailboxPrefix] = useState("");
-  const [code, setCode] = useState("");
-  const [sentTo, setSentTo] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const prefixes = data?.mailboxPrefixes ?? [];
-  const claimed = (data?.domains ?? []).filter((domain) =>
-    domains.includes(domain.domain)
-  );
-  // Keep the section header while the domain list loads so the control does not
-  // read as unavailable and then shift in. Nothing to load if no domains exist.
-  if (isLoading && domains.length > 0) {
-    return (
-      <InputVertical
-        title="Domain verification"
-        description="A domain signs your workspace's users in automatically only after you verify you own it."
-        withLabel
-      >
-        <Section flexDirection="row" alignItems="center" height="fit" gap={0.5}>
-          <SvgSimpleLoader className="size-4 animate-spin text-text-03" />
-          <Text font="main-ui-body" color="text-03">
-            Loading domains…
-          </Text>
-        </Section>
-      </InputVertical>
-    );
-  }
-  if (claimed.length === 0) return null;
-
-  function openVerify(domain: string) {
-    setActiveDomain(domain);
-    setMailboxPrefix(prefixes[0] ?? "");
-    setCode("");
-    setSentTo(null);
-  }
-
-  async function sendCode(domain: string) {
-    setBusy(true);
-    try {
-      const { recipient } = await sendDomainVerificationCode(
-        domain,
-        mailboxPrefix
-      );
-      setSentTo(recipient);
-      toast.success(`Code sent to ${recipient}`);
-    } catch (exc) {
-      toast.error(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setBusy(false);
-    }
-  }
+  if (domains.length === 0) return null;
 
   async function verify(domain: string) {
-    setBusy(true);
+    setBusyDomain(domain);
     try {
-      const updated = await verifyDomainViaEmail(domain, code);
-      await mutate(updated, { revalidate: false });
-      setActiveDomain(null);
+      await verifyDomainViaDns(domain);
+      await mutate();
       toast.success(`${domain} verified`);
     } catch (exc) {
       toast.error(exc instanceof Error ? exc.message : String(exc));
     } finally {
-      setBusy(false);
+      setBusyDomain(null);
     }
   }
+
+  function renderDomain(domain: SSOLoginDomainStatus) {
+    const busy = busyDomain === domain.domain;
+    return (
+      <Section
+        key={domain.domain}
+        flexDirection="column"
+        alignItems="stretch"
+        height="fit"
+        gap={0.5}
+        padding={0.75}
+        className="rounded-12 border border-border-02"
+      >
+        <Section
+          flexDirection="row"
+          justifyContent="between"
+          alignItems="center"
+          height="fit"
+        >
+          <Text font="main-ui-body" color="text-04" as="span">
+            {domain.domain}
+          </Text>
+          {domain.verified ? (
+            <Tag color="green" title="Verified" />
+          ) : (
+            <Tag color="amber" title="Pending" />
+          )}
+        </Section>
+
+        {!domain.verified && (
+          <Section
+            flexDirection="column"
+            alignItems="stretch"
+            height="fit"
+            gap={0.5}
+          >
+            <Text font="secondary-body" color="text-03" as="span">
+              {`Add this TXT record at your DNS provider to prove you control ${domain.domain}, then verify.`}
+            </Text>
+            <CopyRow label="Type" value="TXT" />
+            {domain.record_host && (
+              <CopyRow label="Name" value={domain.record_host} />
+            )}
+            {domain.record_value && (
+              <CopyRow label="Value" value={domain.record_value} />
+            )}
+            <Section flexDirection="row" justifyContent="end" height="fit">
+              <Button
+                onClick={() => verify(domain.domain)}
+                disabled={busy}
+                icon={busy ? SvgSimpleLoader : undefined}
+              >
+                Verify domain
+              </Button>
+            </Section>
+          </Section>
+        )}
+      </Section>
+    );
+  }
+
+  const rows = data?.domains ?? [];
 
   return (
     <InputVertical
       title="Domain verification"
-      description="A domain signs your workspace's users in automatically only after you verify you own it."
+      description="A domain signs your workspace's users in automatically only after you verify you own it. Add the DNS record below, then verify."
       withLabel
     >
       <Section
@@ -108,102 +150,21 @@ export default function SSODomainVerification({
         height="fit"
         gap={0.5}
       >
-        {claimed.map((domain) => (
+        {isLoading && rows.length === 0 ? (
           <Section
-            key={domain.domain}
-            flexDirection="column"
-            alignItems="stretch"
+            flexDirection="row"
+            alignItems="center"
             height="fit"
             gap={0.5}
-            padding={0.75}
-            className="rounded-12 border border-border-02"
           >
-            <Section
-              flexDirection="row"
-              justifyContent="between"
-              alignItems="center"
-              height="fit"
-            >
-              <Text font="main-ui-body" color="text-04" as="span">
-                {domain.domain}
-              </Text>
-              {domain.verified ? (
-                <Tag color="green" title="Verified" />
-              ) : (
-                activeDomain !== domain.domain && (
-                  <Button
-                    prominence="secondary"
-                    size="sm"
-                    onClick={() => openVerify(domain.domain)}
-                  >
-                    Verify
-                  </Button>
-                )
-              )}
-            </Section>
-
-            {!domain.verified && activeDomain === domain.domain && (
-              <Section
-                flexDirection="column"
-                alignItems="stretch"
-                height="fit"
-                gap={0.5}
-              >
-                {sentTo === null ? (
-                  <>
-                    <InputSelect
-                      value={mailboxPrefix}
-                      onValueChange={setMailboxPrefix}
-                    >
-                      <InputSelect.Trigger placeholder="Send code to" />
-                      <InputSelect.Content>
-                        {prefixes.map((prefix) => (
-                          <InputSelect.Item key={prefix} value={prefix}>
-                            {`${prefix}@${domain.domain}`}
-                          </InputSelect.Item>
-                        ))}
-                      </InputSelect.Content>
-                    </InputSelect>
-                    <Section
-                      flexDirection="row"
-                      justifyContent="end"
-                      height="fit"
-                    >
-                      <Button
-                        onClick={() => sendCode(domain.domain)}
-                        disabled={busy || !mailboxPrefix}
-                        icon={busy ? SvgSimpleLoader : undefined}
-                      >
-                        Send code
-                      </Button>
-                    </Section>
-                  </>
-                ) : (
-                  <>
-                    <InputTypeIn
-                      value={code}
-                      onChange={(event) => setCode(event.target.value)}
-                      placeholder={`Enter the code sent to ${sentTo}`}
-                    />
-                    <Section
-                      flexDirection="row"
-                      justifyContent="end"
-                      height="fit"
-                    >
-                      <Button
-                        onClick={() => verify(domain.domain)}
-                        disabled={busy || !code}
-                        icon={busy ? SvgSimpleLoader : undefined}
-                      >
-                        Verify
-                      </Button>
-                    </Section>
-                  </>
-                )}
-              </Section>
-            )}
+            <SvgSimpleLoader className="size-4 animate-spin text-text-03" />
+            <Text font="main-ui-body" color="text-03">
+              Loading…
+            </Text>
           </Section>
-        ))}
+        ) : (
+          rows.map(renderDomain)
+        )}
       </Section>
     </InputVertical>
   );

@@ -30,26 +30,21 @@ class SSOProviderEnabledRequest(BaseModel):
 class SSOLoginDomainStatus(BaseModel):
     domain: str
     verified: bool
+    # The TXT record to publish to prove control. Unset once verified.
+    record_host: str | None = None
+    record_value: str | None = None
 
 
 class SSOLoginDomainsResponse(BaseModel):
     domains: list[SSOLoginDomainStatus]
-    # Role-mailbox local parts a verification code may be sent to.
-    mailbox_prefixes: list[str]
 
 
-class SSODomainSendCodeRequest(BaseModel):
+class SSODomainVerifyRequest(BaseModel):
     domain: str
-    mailbox_prefix: str
 
 
-class SSODomainSendCodeResponse(BaseModel):
-    recipient: str
-
-
-class SSODomainVerifyEmailRequest(BaseModel):
-    domain: str
-    code: str
+class SSODomainRecordsRequest(BaseModel):
+    domains: list[str]
 
 
 class SSOProviderResponse(BaseModel):

@@ -18,8 +18,8 @@ from sqlalchemy import Table, delete, inspect, select
 from sqlalchemy.orm import Session
 
 from ee.onyx.auth.sso_domain_verification import (
-    confirm_domain_verification,
-    send_domain_verification_code,
+    verification_record,
+    verify_domain_via_dns,
 )
 from ee.onyx.db.tenant_sso_domain import (
     claim_email_domains,
@@ -174,30 +174,6 @@ def catalog_with_domains(catalog_session: Session) -> Generator[Session, None, N
             catalog_session.commit()
 
 
-class _FakeRedis:
-    """Dict-backed stand-in for the tenant Redis client the code path uses."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, str] = {}
-
-    def set(self, key: str, value: str, **_kwargs: object) -> None:
-        self.store[key] = value
-
-    def get(self, key: str) -> str | None:
-        return self.store.get(key)
-
-    def incr(self, key: str) -> int:
-        self.store[key] = str(int(self.store.get(key, "0")) + 1)
-        return int(self.store[key])
-
-    def expire(self, key: str, _ttl: int) -> None:
-        pass
-
-    def delete(self, *keys: str) -> None:
-        for key in keys:
-            self.store.pop(key, None)
-
-
 def _clear_domains(session: Session, tenant_id: str) -> None:
     session.execute(
         delete(TenantSSODomain).where(TenantSSODomain.tenant_id == tenant_id)
@@ -205,8 +181,11 @@ def _clear_domains(session: Session, tenant_id: str) -> None:
     session.commit()
 
 
-def _sent_code(fake_redis: _FakeRedis, domain: str) -> str:
-    return fake_redis.store[f"sso_domain_verify:{domain}"]
+class _TxtRecord:
+    """One TXT answer whose joined strings decode to `value`."""
+
+    def __init__(self, value: str) -> None:
+        self.strings = [value.encode()]
 
 
 @patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
@@ -238,123 +217,39 @@ def test_unverified_domain_does_not_route(catalog_with_domains: Session) -> None
 
 
 @patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
-def test_email_verification_marks_verified_and_routes(
+def test_dns_verification_marks_verified_and_routes(
     catalog_with_domains: Session,
 ) -> None:
+    """Publishing the TXT record the workspace names verifies the domain, after
+    which it routes its users."""
     tenant_id = f"tenant_{uuid4().hex[:12]}"
-    domain = f"acme-{uuid4().hex[:8]}.example"
-    fake_redis = _FakeRedis()
+    domain = f"acme-{uuid4().hex[:8]}.com"
     try:
         claim_email_domains(tenant_id, [domain])
-        with (
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_redis_client",
-                return_value=fake_redis,
-            ),
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_shared_redis_client",
-                return_value=fake_redis,
-            ),
-            patch("ee.onyx.auth.sso_domain_verification.send_email") as mock_send,
-        ):
-            recipient = send_domain_verification_code(tenant_id, domain, "admin")
-            assert recipient == f"admin@{domain}"
-            assert mock_send.called
-            code = _sent_code(fake_redis, domain)
-            assert confirm_domain_verification(tenant_id, domain, code) is True
+        _host, value = verification_record(tenant_id, domain)
+        with patch("dns.resolver.Resolver") as resolver_cls:
+            resolver_cls.return_value.resolve.return_value = [_TxtRecord(value)]
+            assert verify_domain_via_dns(tenant_id, domain) is True
         assert lookup_tenant_id_for_email_domain(f"user@{domain}") == tenant_id
     finally:
         _clear_domains(catalog_with_domains, tenant_id)
 
 
 @patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
-def test_email_verification_burns_the_code_after_repeated_wrong_tries(
+def test_dns_verification_without_the_record_does_not_route(
     catalog_with_domains: Session,
 ) -> None:
-    """A guessable code is only safe if wrong tries run out, so the sixth is
-    refused and the domain stays unverified."""
+    """A missing or wrong TXT record leaves the domain unverified and unrouted."""
     tenant_id = f"tenant_{uuid4().hex[:12]}"
-    domain = f"acme-{uuid4().hex[:8]}.example"
-    fake_redis = _FakeRedis()
+    domain = f"acme-{uuid4().hex[:8]}.com"
     try:
         claim_email_domains(tenant_id, [domain])
-        with (
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_redis_client",
-                return_value=fake_redis,
-            ),
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_shared_redis_client",
-                return_value=fake_redis,
-            ),
-            patch("ee.onyx.auth.sso_domain_verification.send_email"),
-        ):
-            send_domain_verification_code(tenant_id, domain, "postmaster")
-            for _ in range(5):
-                assert (
-                    confirm_domain_verification(tenant_id, domain, "wrong-code")
-                    is False
-                )
-            with pytest.raises(OnyxError):
-                confirm_domain_verification(tenant_id, domain, "wrong-code")
+        with patch("dns.resolver.Resolver") as resolver_cls:
+            resolver_cls.return_value.resolve.return_value = [
+                _TxtRecord("onyx-verify=wrong")
+            ]
+            assert verify_domain_via_dns(tenant_id, domain) is False
         assert lookup_tenant_id_for_email_domain(f"user@{domain}") is None
-    finally:
-        _clear_domains(catalog_with_domains, tenant_id)
-
-
-@patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
-def test_send_code_refuses_a_non_role_mailbox(catalog_with_domains: Session) -> None:
-    """The address is built from the claimed domain, but the local part must be a
-    role mailbox, so a code can't be sent to an arbitrary inbox."""
-    tenant_id = f"tenant_{uuid4().hex[:12]}"
-    domain = f"acme-{uuid4().hex[:8]}.example"
-    fake_redis = _FakeRedis()
-    try:
-        claim_email_domains(tenant_id, [domain])
-        with (
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_redis_client",
-                return_value=fake_redis,
-            ),
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_shared_redis_client",
-                return_value=fake_redis,
-            ),
-            patch("ee.onyx.auth.sso_domain_verification.send_email") as mock_send,
-        ):
-            with pytest.raises(OnyxError):
-                send_domain_verification_code(tenant_id, domain, "ceo")
-            assert not mock_send.called
-    finally:
-        _clear_domains(catalog_with_domains, tenant_id)
-
-
-@patch("ee.onyx.db.tenant_sso_domain.MULTI_TENANT", True)
-def test_send_code_is_rate_limited_per_domain(
-    catalog_with_domains: Session,
-) -> None:
-    """Each send is a fresh code, so resends are capped to keep the code from
-    being ground down and the role mailbox from being spammed."""
-    tenant_id = f"tenant_{uuid4().hex[:12]}"
-    domain = f"acme-{uuid4().hex[:8]}.example"
-    fake_redis = _FakeRedis()
-    try:
-        claim_email_domains(tenant_id, [domain])
-        with (
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_redis_client",
-                return_value=fake_redis,
-            ),
-            patch(
-                "ee.onyx.auth.sso_domain_verification.get_shared_redis_client",
-                return_value=fake_redis,
-            ),
-            patch("ee.onyx.auth.sso_domain_verification.send_email"),
-        ):
-            for _ in range(10):
-                send_domain_verification_code(tenant_id, domain, "admin")
-            with pytest.raises(OnyxError):
-                send_domain_verification_code(tenant_id, domain, "admin")
     finally:
         _clear_domains(catalog_with_domains, tenant_id)
 

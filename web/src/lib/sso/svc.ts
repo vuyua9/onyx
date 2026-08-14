@@ -90,20 +90,13 @@ export function setSSOProviderEnabled(
 export interface SSOLoginDomainStatus {
   domain: string;
   verified: boolean;
+  // The TXT record to publish. Unset once the domain is verified.
+  record_host?: string | null;
+  record_value?: string | null;
 }
 
 export interface SSOLoginDomains {
   domains: SSOLoginDomainStatus[];
-  mailboxPrefixes: string[];
-}
-
-interface SSOLoginDomainsWire {
-  domains: SSOLoginDomainStatus[];
-  mailbox_prefixes: string[];
-}
-
-function toSSOLoginDomains(wire: SSOLoginDomainsWire): SSOLoginDomains {
-  return { domains: wire.domains, mailboxPrefixes: wire.mailbox_prefixes };
 }
 
 export async function fetchSSOLoginDomains(): Promise<SSOLoginDomains> {
@@ -112,28 +105,23 @@ export async function fetchSSOLoginDomains(): Promise<SSOLoginDomains> {
     headers: JSON_HEADERS,
   });
   if (!response.ok) throw new Error(await errorDetail(response));
-  return toSSOLoginDomains(await response.json());
+  return await response.json();
 }
 
-export function sendDomainVerificationCode(
-  domain: string,
-  mailboxPrefix: string
-): Promise<{ recipient: string }> {
-  return ssoRequest<{ recipient: string }>(
-    `${SWR_KEYS.adminSsoDomains}/send-code`,
-    "POST",
-    { domain, mailbox_prefix: mailboxPrefix }
-  );
-}
-
-export async function verifyDomainViaEmail(
-  domain: string,
-  code: string
+export function fetchDomainRecords(
+  domains: string[]
 ): Promise<SSOLoginDomains> {
-  const wire = await ssoRequest<SSOLoginDomainsWire>(
-    `${SWR_KEYS.adminSsoDomains}/verify-email`,
+  return ssoRequest<SSOLoginDomains>(
+    `${SWR_KEYS.adminSsoDomains}/records`,
     "POST",
-    { domain, code }
+    { domains }
   );
-  return toSSOLoginDomains(wire);
+}
+
+export function verifyDomainViaDns(domain: string): Promise<SSOLoginDomains> {
+  return ssoRequest<SSOLoginDomains>(
+    `${SWR_KEYS.adminSsoDomains}/verify-dns`,
+    "POST",
+    { domain }
+  );
 }
